@@ -36,13 +36,23 @@ export interface OutreachCampaign {
   updated_at: string;
 }
 
-// Example: Contact type
+// Contact type (matches database schema)
 export interface Contact {
   id: string;
   email: string;
-  name: string;
-  company?: string;
-  campaign_id?: string;
+  first_name?: string;
+  last_name?: string;
+  source: string;
+  quality_score: number;
+  status: "active" | "inactive" | "bounced" | "unsubscribed";
+  tags: any[];
+  custom_fields: {
+    imported_from?: string;
+    import_date?: string;
+    found_in?: "from" | "to" | "cc";
+    original_name?: string;
+    [key: string]: any;
+  };
   created_at: string;
   updated_at: string;
 }
