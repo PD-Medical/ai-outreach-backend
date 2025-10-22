@@ -1,13 +1,16 @@
 {
   "name": "ai-outreach-backend",
   "version": "1.0.0",
-  "description": "AI Automation Backend for PD Medical - Powered by Supabase & Vercel",
-  "main": "index.js",
+  "description": "AI Automation Backend for PD Medical - Powered by Supabase Edge Functions",
+  "type": "module",
   "scripts": {
-    "dev": "vercel dev",
-    "build": "tsc",
-    "deploy": "vercel --prod",
-    "lint": "eslint . --ext .ts",
+    "supabase:start": "supabase start",
+    "supabase:stop": "supabase stop",
+    "supabase:status": "supabase status",
+    "functions:serve": "supabase functions serve",
+    "functions:deploy": "supabase functions deploy",
+    "db:reset": "supabase db reset",
+    "db:push": "supabase db push",
     "type-check": "tsc --noEmit"
   },
   "keywords": [
@@ -15,20 +18,14 @@
     "automation",
     "backend",
     "supabase",
-    "vercel"
+    "edge-functions",
+    "deno"
   ],
   "author": "",
   "license": "MIT",
-  "dependencies": {
-    "@supabase/supabase-js": "^2.39.0",
-    "cors": "^2.8.5",
-    "dotenv": "^16.3.1"
-  },
   "devDependencies": {
-    "@types/cors": "^2.8.17",
     "@types/node": "^20.10.6",
-    "@vercel/node": "^3.0.12",
-    "typescript": "^5.3.3"
+    "typescript": "^5.3.3",
+    "supabase": "^1.142.2"
   }
 }
-

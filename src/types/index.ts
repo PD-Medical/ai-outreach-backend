@@ -1,4 +1,9 @@
 /**
+ * Shared TypeScript Types for AI Outreach Backend
+ * Can be used in both Edge Functions and client code
+ */
+
+/**
  * API Response Types
  */
 export interface ApiResponse<T = any> {
@@ -25,11 +30,21 @@ export interface User {
 export interface OutreachCampaign {
   id: string;
   name: string;
-  status: 'draft' | 'active' | 'paused' | 'completed';
+  status: "draft" | "active" | "paused" | "completed";
   created_by: string;
   created_at: string;
   updated_at: string;
 }
 
-// Add more types as needed for your AI automation project
+// Example: Contact type
+export interface Contact {
+  id: string;
+  email: string;
+  name: string;
+  company?: string;
+  campaign_id?: string;
+  created_at: string;
+  updated_at: string;
+}
 
+// Add more types as needed for your AI automation project
