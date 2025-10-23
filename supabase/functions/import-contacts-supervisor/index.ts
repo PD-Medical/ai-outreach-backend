@@ -111,13 +111,15 @@ serve(async (req) => {
 // Email Server Import Function
 async function importFromEmailServer(supabaseClient: any, request: ImportRequest): Promise<ImportResult> {
   try {
-    const emailId = request.email_id || Deno.env.get("EMAIL_USER") || "peter@pdmedical.com.au";
     const limit = request.limit || 500;
     
-    console.log(`[EMAIL] Importing from email server: ${emailId}`);
+    // Process one email account at a time for maximum extraction
+    const emailAccount = request.email_id || 'peter@pdmedical.com.au';
     
-    // Import contacts from email server
-    const { contacts, message } = await emailServerImport(emailId, limit);
+    console.log(`[EMAIL] Importing from single account: ${emailAccount}`);
+    
+    // Import contacts from single email account
+    const { contacts, message } = await emailServerImport([emailAccount], limit);
     
     // Insert contacts into database with batch processing
     let insertedCount = 0;
@@ -159,7 +161,7 @@ async function importFromEmailServer(supabaseClient: any, request: ImportRequest
       inserted: insertedCount,
       errors: errorCount,
       message: message,
-      details: { email_id: emailId, limit }
+      details: { email_account: emailAccount, limit }
     };
     
   } catch (error) {

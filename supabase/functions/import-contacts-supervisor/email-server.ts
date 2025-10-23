@@ -13,7 +13,7 @@ export interface Contact {
 }
 
 export async function importFromEmailServer(
-  emailId: string,
+  emailIds: string[],
   limit: number = 500
 ): Promise<{ contacts: Contact[], message: string }> {
   
@@ -23,7 +23,94 @@ export async function importFromEmailServer(
     throw new Error("EMAIL_PASSWORD environment variable is required");
   }
 
+  console.log(`[EMAIL] Processing ${emailIds.length} email accounts: ${emailIds.join(', ')}`);
+
+  const allContacts = new Map<string, Contact>();
+  const globalStartTime = Date.now();
+  const globalMaxTime = 50000; // 50 seconds total for all accounts (reduced due to dual folder processing)
+  
+  // Process each email account
+  for (const emailId of emailIds) {
+    // Global timeout check
+    if (Date.now() - globalStartTime > globalMaxTime) {
+      console.log(`[WARN] Global timeout reached, stopping at account: ${emailId}`);
+      break;
+    }
+    console.log(`[EMAIL] Processing account: ${emailId}`);
+    
+    try {
+      const accountContacts = await processEmailAccount(emailId, emailPass, limit);
+      
+      // Merge contacts from this account
+      for (const contact of accountContacts) {
+        allContacts.set(contact.email, contact);
+      }
+      
+      if (accountContacts.length === 0) {
+        console.log(`[WARN] ${emailId}: 0 contacts extracted - may need investigation`);
+      } else {
+        console.log(`[SUCCESS] ${emailId}: ${accountContacts.length} contacts`);
+      }
+      
+    } catch (error) {
+      console.error(`[ERROR] ${emailId} failed:`, error.message);
+      // Continue with other accounts
+    }
+  }
+  
+  const contactsList = Array.from(allContacts.values());
+  console.log(`[SUCCESS] Total unique contacts from all accounts: ${contactsList.length}`);
+  
+  return {
+    contacts: contactsList,
+    message: `Successfully extracted ${contactsList.length} contacts from ${emailIds.length} accounts`
+  };
+}
+
+async function processEmailAccount(
+  emailId: string,
+  emailPass: string,
+  limit: number
+): Promise<Contact[]> {
+  
   console.log(`[EMAIL] Connecting to mail.pdmedical.com.au as ${emailId}`);
+
+  const contacts = new Map<string, Contact>();
+  
+  // Process INBOX only (SENT folder doesn't exist on this server)
+  const folders = ['INBOX'];
+  
+  for (const folder of folders) {
+    try {
+      console.log(`[EMAIL] Processing folder: ${folder}`);
+      const folderContacts = await processFolder(emailId, emailPass, folder, limit);
+      
+      // Merge contacts from this folder
+      for (const contact of folderContacts) {
+        contacts.set(contact.email, contact);
+      }
+      
+      console.log(`[SUCCESS] ${folder}: ${folderContacts.length} contacts`);
+    } catch (error) {
+      console.log(`[WARN] ${folder} folder failed:`, error.message);
+      // Continue with other folders
+    }
+  }
+  
+  const contactsList = Array.from(contacts.values());
+  console.log(`[SUCCESS] Extracted ${contactsList.length} unique contacts from ${emailId}`);
+  
+  return contactsList;
+}
+
+async function processFolder(
+  emailId: string,
+  emailPass: string,
+  folder: string,
+  limit: number
+): Promise<Contact[]> {
+  
+  console.log(`[EMAIL] Processing ${folder} folder for ${emailId}`);
 
   const contacts = new Map<string, Contact>();
   
@@ -83,13 +170,13 @@ export async function importFromEmailServer(
     }
     console.log("[SUCCESS] Login successful");
     
-    await sendCommand('A2 SELECT INBOX');
+    await sendCommand(`A2 SELECT ${folder}`);
     const selectResponse = await readResponse();
     
     if (!selectResponse.includes('A2 OK')) {
-      throw new Error(`Failed to select INBOX: ${selectResponse}`);
+      throw new Error(`Failed to select ${folder}: ${selectResponse}`);
     }
-    console.log("[SUCCESS] INBOX selected");
+    console.log(`[SUCCESS] ${folder} selected`);
     
     // Search for ALL messages
     await sendCommand('A3 SEARCH ALL');
@@ -98,9 +185,9 @@ export async function importFromEmailServer(
     const messageIds = searchResponse.match(/\d+/g) || [];
     console.log(`[EMAIL] Found ${messageIds.length} total messages`);
     
-    // Limit messages to avoid timeout (all 308 messages)
-    const limitedIds = messageIds;
-    console.log(`[EMAIL] Processing ${limitedIds.length} messages...`);
+    // Limit messages to avoid timeout (max 500 messages per account for single-account processing)
+    const limitedIds = messageIds.slice(0, 500);
+    console.log(`[EMAIL] Processing ${limitedIds.length} messages (single-account mode)...`);
     
     const parseName = (fullName?: string): { first_name?: string, last_name?: string } => {
       if (!fullName) return { first_name: undefined, last_name: undefined };
@@ -117,9 +204,9 @@ export async function importFromEmailServer(
       };
     };
     
-    // Track time to avoid timeout
+    // Track time to avoid timeout - increased for single-account processing
     const startTime = Date.now();
-    const maxExecutionTime = 55000; // 55 seconds max (Edge Functions have 60s timeout)
+    const maxExecutionTime = 45000; // 45 seconds max per account (single-account mode)
     
     // Process messages
     for (let i = 0; i < limitedIds.length; i++) {
@@ -219,12 +306,9 @@ export async function importFromEmailServer(
     console.log("[SUCCESS] Disconnected from IMAP server");
     
     const contactsList = Array.from(contacts.values());
-    console.log(`[SUCCESS] Extracted ${contactsList.length} unique contacts from email server`);
+    console.log(`[SUCCESS] Extracted ${contactsList.length} unique contacts from ${folder}`);
     
-    return {
-      contacts: contactsList,
-      message: `Successfully extracted ${contactsList.length} contacts from mail.pdmedical.com.au`
-    };
+    return contactsList;
     
   } catch (error) {
     // Ensure connection is closed on error
