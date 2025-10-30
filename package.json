@@ -25,7 +25,13 @@
   "license": "MIT",
   "devDependencies": {
     "@types/node": "^20.10.6",
-    "typescript": "^5.3.3",
-    "supabase": "^1.142.2"
+    "supabase": "^1.142.2",
+    "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "@langchain/core": "^1.0.2",
+    "@langchain/langgraph": "^1.0.1",
+    "@langchain/openai": "^1.0.0",
+    "langchain": "^1.0.2"
   }
 }
