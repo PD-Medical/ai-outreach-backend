@@ -25,7 +25,7 @@
   "license": "MIT",
   "devDependencies": {
     "@types/node": "^20.10.6",
-    "typescript": "^5.3.3",
-    "supabase": "^1.142.2"
+    "supabase": "^1.226.4",
+    "typescript": "^5.3.3"
   }
 }
