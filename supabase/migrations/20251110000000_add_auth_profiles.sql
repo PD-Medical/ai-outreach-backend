@@ -9,12 +9,14 @@ $$;
 
 -- Profiles table linked to auth.users
 create table if not exists public.profiles (
-  id uuid primary key references auth.users(id) on delete cascade,
+  id uuid not null,
   full_name text,
-  role public.role_type not null default 'sales',
+  role public.role_type not null default 'sales'::public.role_type,
   created_at timestamptz not null default timezone('utc', now()),
-  updated_at timestamptz not null default timezone('utc', now())
-);
+  updated_at timestamptz not null default timezone('utc', now()),
+  constraint profiles_pkey primary key (id),
+  constraint profiles_id_fkey foreign key (id) references auth.users (id) on delete cascade
+) tablespace pg_default;
 
 -- Keep updated_at current
 create or replace function public.handle_profiles_updated_at()
@@ -27,11 +29,30 @@ begin
 end;
 $$;
 
+-- Prevent role changes outside service role
+create or replace function public.prevent_role_change()
+returns trigger
+language plpgsql
+as $$
+begin
+  if current_user <> 'service_role' and new.role <> old.role then
+    raise exception 'Role changes require service role privileges';
+  end if;
+  return new;
+end;
+$$;
+
 drop trigger if exists profiles_set_timestamp on public.profiles;
 create trigger profiles_set_timestamp
 before update on public.profiles
 for each row
 execute function public.handle_profiles_updated_at();
+
+drop trigger if exists prevent_role_change_trigger on public.profiles;
+create trigger prevent_role_change_trigger
+before update on public.profiles
+for each row
+execute function public.prevent_role_change();
 
 -- Enable RLS and policies
 alter table public.profiles enable row level security;
@@ -110,4 +131,18 @@ begin
   end if;
 end
 $$;
+
+-- Read-only view with email
+create or replace view public.profiles_with_email as
+select
+  p.id,
+  p.full_name,
+  p.role,
+  p.created_at,
+  p.updated_at,
+  u.email
+from public.profiles p
+join auth.users u on u.id = p.id;
+
+grant select on public.profiles_with_email to authenticated;
 
