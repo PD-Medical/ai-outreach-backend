@@ -6,9 +6,9 @@ import { corsHeaders } from "../_shared/cors.ts"
 type RoleType = "admin" | "sales" | "accounts" | "management"
 
 type RequestBody = {
+  email?: string
+  full_name?: string
   role?: RoleType
-  column?: string
-  value?: boolean
 }
 
 const supabaseUrl = Deno.env.get("SUPABASE_URL") ?? ""
@@ -29,25 +29,6 @@ function isRole(value: unknown): value is RoleType {
   return value === "admin" || value === "sales" || value === "accounts" || value === "management"
 }
 
-// Valid column names in role_permissions table
-const validColumns = [
-  "view_users",
-  "manage_users",
-  "view_contacts",
-  "manage_contacts",
-  "view_workflows",
-  "view_campaigns",
-  "view_emails",
-  "manage_campaigns",
-  "approve_campaigns",
-  "view_analytics",
-  "manage_approvals",
-]
-
-function isValidColumn(column: string): boolean {
-  return validColumns.includes(column)
-}
-
 serve(async (request) => {
   if (request.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders })
@@ -66,20 +47,17 @@ serve(async (request) => {
   try {
     const body = (await request.json()) as RequestBody
 
-    if (!body.role || !body.column || typeof body.value === "undefined") {
-      return new Response(
-        JSON.stringify({ success: false, message: "Missing role, column, or value" }),
-        {
-          status: 400,
-          headers: {
-            "Content-Type": "application/json",
-            ...corsHeaders,
-          },
-        }
-      )
+    if (!body.email || !body.full_name) {
+      return new Response(JSON.stringify({ success: false, message: "Missing email or full_name" }), {
+        status: 400,
+        headers: {
+          "Content-Type": "application/json",
+          ...corsHeaders,
+        },
+      })
     }
 
-    if (!isRole(body.role)) {
+    if (body.role && !isRole(body.role)) {
       return new Response(JSON.stringify({ success: false, message: "Invalid role" }), {
         status: 400,
         headers: {
@@ -89,9 +67,13 @@ serve(async (request) => {
       })
     }
 
-    if (!isValidColumn(body.column)) {
-      return new Response(JSON.stringify({ success: false, message: "Invalid column name" }), {
-        status: 400,
+    // Find the auth user by email
+    const { data: authUsers, error: listError } = await supabaseAdmin.auth.admin.listUsers()
+
+    if (listError) {
+      console.error("Failed to list users", listError)
+      return new Response(JSON.stringify({ success: false, message: "Failed to find user" }), {
+        status: 500,
         headers: {
           "Content-Type": "application/json",
           ...corsHeaders,
@@ -99,16 +81,49 @@ serve(async (request) => {
       })
     }
 
-    // Update the role_permissions table
-    const { error } = await supabaseAdmin
-      .from("role_permissions")
-      .update({ [body.column]: body.value })
-      .eq("role", body.role)
+    const authUser = authUsers.users.find((u) => u.email === body.email)
 
-    if (error) {
-      console.error("Failed to update role permission", error)
+    if (!authUser) {
       return new Response(
-        JSON.stringify({ success: false, message: error.message || "Failed to update permission" }),
+        JSON.stringify({
+          success: false,
+          message: `No user found with email ${body.email}. The user must sign up first or be created in the auth system.`,
+        }),
+        {
+          status: 404,
+          headers: {
+            "Content-Type": "application/json",
+            ...corsHeaders,
+          },
+        }
+      )
+    }
+
+    // Create profile with new schema (auth_user_id)
+    let { error: profileError } = await supabaseAdmin.from("profiles").insert({
+      auth_user_id: authUser.id,
+      full_name: body.full_name,
+      role: body.role ?? "sales",
+    })
+
+    // If that fails, try old schema (id)
+    if (profileError && profileError.message?.includes("column") && profileError.message?.includes("does not exist")) {
+      profileError = null
+      const oldResult = await supabaseAdmin.from("profiles").insert({
+        id: authUser.id,
+        full_name: body.full_name,
+        role: body.role ?? "sales",
+      })
+      profileError = oldResult.error
+    }
+
+    if (profileError) {
+      console.error("Failed to create profile", profileError)
+      return new Response(
+        JSON.stringify({
+          success: false,
+          message: `Failed to create profile: ${profileError.message || "Unknown error"}`,
+        }),
         {
           status: 500,
           headers: {
@@ -119,14 +134,14 @@ serve(async (request) => {
       )
     }
 
-    return new Response(JSON.stringify({ success: true, message: "Permission updated" }), {
+    return new Response(JSON.stringify({ success: true, message: "Profile created successfully" }), {
       headers: {
         "Content-Type": "application/json",
         ...corsHeaders,
       },
     })
   } catch (error) {
-    console.error("Unexpected error updating permission", error)
+    console.error("Unexpected error creating profile", error)
     return new Response(
       JSON.stringify({
         success: false,
