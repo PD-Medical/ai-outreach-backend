@@ -46,6 +46,8 @@ serve(async (request) => {
   try {
     const body = (await request.json()) as RequestBody
 
+    console.log("Updating role for userId:", body.userId, "to role:", body.role)
+
     if (!body.userId || !body.role) {
       return new Response(JSON.stringify({ success: false, message: "Missing userId or role" }), {
         status: 400,
@@ -66,21 +68,41 @@ serve(async (request) => {
       })
     }
 
-    const updateProfile = await supabaseAdmin
+    // Try new schema first (auth_user_id)
+    let updateProfile = await supabaseAdmin
       .from("profiles")
       .update({ role: body.role })
-      .eq("id", body.userId)
+      .eq("auth_user_id", body.userId)
+
+    // If that fails, try old schema (id)
+    if (updateProfile.error && updateProfile.error.message?.includes("column") && updateProfile.error.message?.includes("does not exist")) {
+      console.log("Trying old schema with id column...")
+      updateProfile = await supabaseAdmin
+        .from("profiles")
+        .update({ role: body.role })
+        .eq("id", body.userId)
+    }
 
     if (updateProfile.error) {
       console.error("Failed to update profile role", updateProfile.error)
-      return new Response(JSON.stringify({ success: false, message: "Failed to update profile role" }), {
-        status: 500,
-        headers: {
-          "Content-Type": "application/json",
-          ...corsHeaders,
-        },
-      })
+      return new Response(
+        JSON.stringify({
+          success: false,
+          message: `Failed to update profile role: ${updateProfile.error.message || "Unknown error"}`,
+        }),
+        {
+          status: 500,
+          headers: {
+            "Content-Type": "application/json",
+            ...corsHeaders,
+          },
+        }
+      )
     }
+
+    // If no error, the update succeeded
+    // Note: Supabase update() doesn't return data by default, so we rely on error checking
+    console.log("Profile role updated successfully")
 
     const updateMetadata = await supabaseAdmin.auth.admin.updateUserById(body.userId, {
       app_metadata: { role: body.role },
