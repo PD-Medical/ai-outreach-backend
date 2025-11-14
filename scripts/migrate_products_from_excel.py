@@ -40,7 +40,7 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # Excel file path
-EXCEL_FILE = 'AI-_PDMedical_Products-29_10_25__1_.xlsx'
+EXCEL_FILE = 'AI- PDMedical_Products-29 10 25 (1).xlsx'
 
 # Cache for organizations and contacts to avoid duplicate lookups
 _org_cache = {}
@@ -62,20 +62,32 @@ def extract_products_from_excel():
     
     products = []
     
-    for idx in range(3, len(df)):
+    # Start from row 4 (Excel row 5) where actual product data begins
+    # Skip header rows (rows 0-3 are empty/headers)
+    for idx in range(4, len(df)):
         row = df.iloc[idx]
         
-        if pd.notna(row[13]) and str(row[13]).strip():
+        # Check if this row has a product code (Column N, index 13)
+        product_code_raw = row[13] if len(row) > 13 else None
+        
+        if pd.notna(product_code_raw) and str(product_code_raw).strip():
+            product_code = str(product_code_raw).strip()
+            
+            # Skip if it's a header text
+            if product_code.lower() in ['product code', 'code', 'forecast', 'total qty']:
+                continue
+            
             product = {
-                'product_code': str(row[13]).strip(),
-                'product_name': str(row[2]).strip() if pd.notna(row[2]) else None,
-                'category_name': str(row[3]).strip() if pd.notna(row[3]) else None,
-                'market_potential': clean_text(row[4]),
-                'background_history': clean_text(row[5]),
-                'key_contacts_reference': clean_text(row[6]),
-                'forecast_notes': clean_text(row[10]),
+                'product_code': product_code,
+                'product_name': clean_text(row[2]) if len(row) > 2 else None,  # Column C
+                'category_name': clean_text(row[3]) if len(row) > 3 else None,  # Column D
+                'market_potential': clean_text(row[4]) if len(row) > 4 else None,  # Column E
+                'background_history': clean_text(row[5]) if len(row) > 5 else None,  # Column F
+                'key_contacts_reference': clean_text(row[6]) if len(row) > 6 else None,  # Column G
+                'forecast_notes': clean_text(row[10]) if len(row) > 10 else None,  # Column K
             }
             
+            # Only add if product code is valid
             if product['product_code'] and product['product_code'].lower() not in ['nan', 'none', '']:
                 products.append(product)
     
@@ -103,17 +115,26 @@ def extract_sales_priorities():
     
     sales_data = []
     
-    for idx in range(3, len(df)):
+    # Start from row 4 (Excel row 5) where actual sales data begins
+    for idx in range(4, len(df)):
         row = df.iloc[idx]
         
-        if pd.notna(row[2]) and clean_text(row[2]):
+        # Check if this row has product name (Column C, index 2)
+        product_name_raw = row[2] if len(row) > 2 else None
+        
+        if pd.notna(product_name_raw) and clean_text(product_name_raw):
+            # Skip header rows
+            product_name = clean_text(product_name_raw)
+            if product_name.lower() in ['product name', 'product', 'name']:
+                continue
+            
             sale = {
-                'product_name': clean_text(row[2]),
-                'priority_label': clean_text(row[1]),
-                'category_name': clean_text(row[3]),
-                'instructions': clean_text(row[4]),
-                'timing_notes': clean_text(row[5]),
-                'additional_notes': clean_text(row[6]),
+                'product_name': product_name,
+                'priority_label': clean_text(row[1]) if len(row) > 1 else None,  # Column B
+                'category_name': clean_text(row[3]) if len(row) > 3 else None,  # Column D
+                'instructions': clean_text(row[4]) if len(row) > 4 else None,  # Column E
+                'timing_notes': clean_text(row[5]) if len(row) > 5 else None,  # Column F
+                'additional_notes': clean_text(row[6]) if len(row) > 6 else None,  # Column G
             }
             sales_data.append(sale)
     
@@ -245,13 +266,15 @@ def extract_domain_from_email(email: str) -> str:
         return email.split('@')[1]
     return 'pdmedical.com.au'
 
-def get_or_create_contact(name: str, email: str, organization_id: str) -> Optional[str]:
-    """Get contact ID or create if doesn't exist"""
+def get_or_create_contact(name: str, email: str, organization_id: str) -> Tuple[Optional[str], bool]:
+    """Get contact ID or create if doesn't exist
+    Returns: (contact_id, was_created)
+    """
     email_lower = email.lower().strip()
     
     # Check cache first
     if email_lower in _contact_cache:
-        return _contact_cache[email_lower]
+        return _contact_cache[email_lower], False  # Already existed
     
     try:
         # Check if contact exists
@@ -260,7 +283,7 @@ def get_or_create_contact(name: str, email: str, organization_id: str) -> Option
         if response.data and len(response.data) > 0:
             contact_id = response.data[0]['id']
             _contact_cache[email_lower] = contact_id
-            return contact_id
+            return contact_id, False  # Already existed
         
         # Parse name
         name_parts = name.split() if name else []
@@ -282,11 +305,11 @@ def get_or_create_contact(name: str, email: str, organization_id: str) -> Option
             contact_id = response.data[0]['id']
             _contact_cache[email_lower] = contact_id
             print(f"   👤 Created contact: {email}")
-            return contact_id
+            return contact_id, True  # Newly created
     except Exception as e:
         print(f"   ⚠️  Error creating contact '{email}': {str(e)}")
     
-    return None
+    return None, False
 
 def merge_product_and_sales_data(products, sales_data):
     """Merge product data with sales priorities"""
@@ -432,14 +455,16 @@ def import_products_to_supabase(products):
                                 continue
                             
                             # Get or create contact
-                            contact_id = get_or_create_contact(
+                            contact_id, was_created = get_or_create_contact(
                                 contact_info.get('name', ''),
                                 contact_info['email'],
                                 org_id
                             )
                             
                             if contact_id and product_id:
-                                contacts_created += 1
+                                # Only count newly created contacts
+                                if was_created:
+                                    contacts_created += 1
                                 
                                 # Create contact_product_interests link
                                 try:
