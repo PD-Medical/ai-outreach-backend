@@ -52,96 +52,194 @@ serve(async (req) => {
   }
 
   try {
-    const { profile_id, email } = await req.json()
+    const body = await req.json()
+    console.log('Regenerate password request body:', JSON.stringify(body))
 
-    if (!profile_id || !email) {
+    const profileIdInput = typeof body.profile_id === 'string' ? body.profile_id.trim() : ''
+    const authUserIdInput = typeof (body.auth_user_id ?? body.user_id) === 'string'
+      ? (body.auth_user_id ?? body.user_id).trim()
+      : ''
+    const emailInput = typeof body.email === 'string' ? body.email.trim().toLowerCase() : ''
+
+    if (!profileIdInput && !authUserIdInput && !emailInput) {
       return new Response(
-        JSON.stringify({ success: false, error: 'Missing required fields: profile_id, email' }),
-        { 
+        JSON.stringify({
+          success: false,
+          error: 'Missing required identifier: profile_id, auth_user_id, or email must be provided.',
+        }),
+        {
           status: 400,
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         }
       )
     }
 
-    // Create admin client
-    // Get auth_user_id from profile (or use id if auth_user_id doesn't exist)
-    let profile: any
-    let profileError: any
-    
-    try {
-      const result = await supabaseAdmin
+    // Fetch profile record flexibly (profile_id or id)
+    let profile: any = null
+    let profileError: any = null
+
+    const fetchProfileByColumn = async (column: 'profile_id' | 'auth_user_id', value: string) => {
+      return supabaseAdmin
         .from('profiles')
-        .select('auth_user_id, id, full_name')
-        .eq('id', profile_id)
-        .single()
-      profile = result.data
-      profileError = result.error
-    } catch (err: any) {
-      // If auth_user_id column doesn't exist, use id
-      if (err?.message?.includes('auth_user_id') || err?.code === '42703') {
-        const result = await supabaseAdmin
-          .from('profiles')
-          .select('id, full_name')
-          .eq('id', profile_id)
-          .single()
-        profile = result.data
+        .select('profile_id, auth_user_id, full_name')
+        .eq(column, value)
+        .maybeSingle()
+    }
+
+    const attempts: Array<[ 'profile_id' | 'auth_user_id', string ]> = []
+    if (profileIdInput) {
+      attempts.push(['profile_id', profileIdInput])
+    }
+    if (authUserIdInput) {
+      attempts.push(['auth_user_id', authUserIdInput])
+    }
+
+    for (const [column, value] of attempts) {
+      const result = await fetchProfileByColumn(column, value)
+      if (result.error) {
+        if (result.error?.message?.includes('profile_id') || result.error?.code === '42703') {
+          // Column doesn't exist, skip
+          continue
+        }
         profileError = result.error
-      } else {
-        profileError = err
+        break
+      }
+      if (result.data) {
+        profile = result.data
+        break
       }
     }
 
-    if (profileError || !profile) {
+    if (!profile && !profileError && emailInput) {
+      // As a last resort, try to find profile via auth user email
+      const list = await supabaseAdmin.auth.admin.listUsers()
+      if (list.error) {
+        profileError = list.error
+      } else {
+        const userMatch = list.data.users.find((u) => u.email?.toLowerCase() === emailInput)
+        if (userMatch) {
+          const fallback = await fetchProfileByColumn('auth_user_id', userMatch.id)
+          profile = fallback.data
+          profileError = fallback.error
+          if (!profile) {
+            profile = { profile_id: userMatch.id, auth_user_id: userMatch.id, full_name: userMatch.user_metadata?.full_name }
+          }
+        }
+      }
+    }
+
+    if (profileError) {
+      console.error('Profile lookup error:', profileError)
       return new Response(
-        JSON.stringify({ success: false, error: 'Profile not found' }),
-        { 
-          status: 404,
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+        JSON.stringify({
+          success: false,
+          error: `Failed to load profile: ${profileError.message ?? 'Unknown error'}`,
+        }),
+        {
+          status: 400,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         }
       )
     }
 
-    // Use auth_user_id if available, otherwise use id
-    const authUserId = profile.auth_user_id || profile.id
+    if (!profile) {
+      return new Response(
+        JSON.stringify({
+          success: false,
+          error: 'Profile not found for supplied identifiers.',
+          identifiers: { profile_id: profileIdInput, auth_user_id: authUserIdInput, email: emailInput },
+        }),
+        {
+          status: 404,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        }
+      )
+    }
+
+    const authUserId = profile.auth_user_id || authUserIdInput || profile.profile_id
+    if (!authUserId) {
+      return new Response(
+        JSON.stringify({
+          success: false,
+          error: 'Profile is missing auth_user_id; cannot reset password.',
+        }),
+        {
+          status: 400,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        }
+      )
+    }
 
     // Generate new password
     const newPassword = generatePassword(12)
 
     // Update password in auth.users
-    const { error: updateError } = await supabaseAdmin.auth.admin.updateUserById(
-      authUserId,
-      { password: newPassword }
-    )
+    const { error: updateError } = await supabaseAdmin.auth.admin.updateUserById(authUserId, {
+      password: newPassword,
+    })
 
     if (updateError) {
       console.error('Password update error:', updateError)
       return new Response(
         JSON.stringify({ success: false, error: updateError.message }),
-        { 
+        {
           status: 400,
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        }
+      )
+    }
+
+    // Determine destination email
+    let emailToSend = emailInput
+    if (!emailToSend) {
+      const { data: userInfo, error: userError } = await supabaseAdmin.auth.admin.getUserById(authUserId)
+      if (userError) {
+        console.error('Failed to fetch user email:', userError)
+        return new Response(
+          JSON.stringify({
+            success: false,
+            error: 'Password updated but failed to fetch user email for notification.',
+          }),
+          {
+            status: 500,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          }
+        )
+      }
+      emailToSend = userInfo.user?.email ?? ''
+    }
+
+    if (!emailToSend) {
+      return new Response(
+        JSON.stringify({
+          success: false,
+          error: 'Password updated but no email address is available to send the new password.',
+        }),
+        {
+          status: 400,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         }
       )
     }
 
     await resend.emails.send({
       from: resendFromEmail,
-      to: email,
+      to: emailToSend,
       subject: 'Your password has been reset',
       html: `
         <p>Hi ${profile.full_name ?? 'there'},</p>
         <p>Your password was reset by an administrator.</p>
-        <p>Email: ${email}</p>
+        <p>Email: ${emailToSend}</p>
         <p>New password: ${newPassword}</p>
         <p>Please sign in and change it immediately.</p>
       `,
     })
 
     return new Response(
-      JSON.stringify({ 
-        success: true, 
-        message: 'Password regenerated successfully. Email sent.'
+      JSON.stringify({
+        success: true,
+        message: 'Password regenerated successfully. Email sent.',
+        email: emailToSend,
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     )
