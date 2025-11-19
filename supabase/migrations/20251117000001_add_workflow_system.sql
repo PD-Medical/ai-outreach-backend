@@ -97,7 +97,7 @@ CREATE TABLE IF NOT EXISTS public.workflows (
 
   -- Metadata
   is_active BOOLEAN DEFAULT true,
-  created_by UUID REFERENCES public.profiles(profile_id),
+  created_by UUID REFERENCES public.profiles(id),
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -199,7 +199,7 @@ CREATE TABLE IF NOT EXISTS public.approval_queue (
   )),
 
   -- Decision details
-  decided_by UUID REFERENCES public.profiles(profile_id),
+  decided_by UUID REFERENCES public.profiles(id),
   decided_at TIMESTAMPTZ,
   modified_params JSONB,
   rejection_reason TEXT,
@@ -245,11 +245,11 @@ CREATE TABLE IF NOT EXISTS public.action_items (
 
   -- Scheduling
   due_date TIMESTAMPTZ,
-  assigned_to UUID REFERENCES public.profiles(profile_id) ON DELETE SET NULL,
+  assigned_to UUID REFERENCES public.profiles(id) ON DELETE SET NULL,
 
   -- Completion tracking
   completed_at TIMESTAMPTZ,
-  completed_by UUID REFERENCES public.profiles(profile_id) ON DELETE SET NULL,
+  completed_by UUID REFERENCES public.profiles(id) ON DELETE SET NULL,
 
   -- Metadata
   created_at TIMESTAMPTZ DEFAULT NOW(),
@@ -288,7 +288,7 @@ CREATE TABLE IF NOT EXISTS public.email_templates (
 
   -- Metadata
   is_active BOOLEAN DEFAULT true,
-  created_by UUID REFERENCES public.profiles(profile_id),
+  created_by UUID REFERENCES public.profiles(id),
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );

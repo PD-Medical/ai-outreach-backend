@@ -176,7 +176,7 @@ CREATE TABLE IF NOT EXISTS public.user_permissions (
     
     created_at TIMESTAMPTZ NOT NULL DEFAULT TIMEZONE('utc'::text, NOW()),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT TIMEZONE('utc'::text, NOW()),
-    created_by UUID REFERENCES auth.users(id),
+  created_by UUID REFERENCES auth.users(id),
     
     CONSTRAINT user_permissions_auth_user_unique UNIQUE(auth_user_id),
     CONSTRAINT user_permissions_auth_user_id_fkey 

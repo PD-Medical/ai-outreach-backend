@@ -1,4 +1,16 @@
 -- Permission matrix for roles
+create or replace function public.current_jwt_role()
+returns text
+language sql
+security definer
+stable
+as $$
+  select coalesce(
+    nullif(current_setting('request.jwt.claim.role', true), ''),
+    auth.role()
+  );
+$$;
+
 create table if not exists public.role_permissions (
   role public.role_type primary key,
   view_users boolean not null default false,

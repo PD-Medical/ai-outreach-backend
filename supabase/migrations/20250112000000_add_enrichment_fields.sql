@@ -18,13 +18,39 @@ ALTER TABLE public.emails ADD COLUMN IF NOT EXISTS sentiment VARCHAR;
 COMMENT ON COLUMN public.emails.sentiment IS 'Emotional tone: positive, neutral, negative, urgent';
 
 ALTER TABLE public.emails ADD COLUMN IF NOT EXISTS priority_score INTEGER;
-ALTER TABLE public.emails ADD CONSTRAINT emails_priority_score_check
-  CHECK (priority_score IS NULL OR (priority_score >= 0 AND priority_score <= 100));
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'emails_priority_score_check'
+      AND conrelid = 'public.emails'::regclass
+  ) THEN
+    EXECUTE '
+      ALTER TABLE public.emails ADD CONSTRAINT emails_priority_score_check
+      CHECK (priority_score IS NULL OR (priority_score >= 0 AND priority_score <= 100))
+    ';
+  END IF;
+END
+$$;
 COMMENT ON COLUMN public.emails.priority_score IS 'AI-determined business importance (0-100)';
 
 ALTER TABLE public.emails ADD COLUMN IF NOT EXISTS spam_score DECIMAL(3,2);
-ALTER TABLE public.emails ADD CONSTRAINT emails_spam_score_check
-  CHECK (spam_score IS NULL OR (spam_score >= 0 AND spam_score <= 1));
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'emails_spam_score_check'
+      AND conrelid = 'public.emails'::regclass
+  ) THEN
+    EXECUTE '
+      ALTER TABLE public.emails ADD CONSTRAINT emails_spam_score_check
+      CHECK (spam_score IS NULL OR (spam_score >= 0 AND spam_score <= 1))
+    ';
+  END IF;
+END
+$$;
 COMMENT ON COLUMN public.emails.spam_score IS 'Likelihood of spam (0.0-1.0)';
 
 ALTER TABLE public.emails ADD COLUMN IF NOT EXISTS ai_processed_at TIMESTAMPTZ;
@@ -34,8 +60,21 @@ ALTER TABLE public.emails ADD COLUMN IF NOT EXISTS ai_model_version VARCHAR;
 COMMENT ON COLUMN public.emails.ai_model_version IS 'AI model used for enrichment';
 
 ALTER TABLE public.emails ADD COLUMN IF NOT EXISTS ai_confidence_score DECIMAL(3,2);
-ALTER TABLE public.emails ADD CONSTRAINT emails_ai_confidence_check
-  CHECK (ai_confidence_score IS NULL OR (ai_confidence_score >= 0 AND ai_confidence_score <= 1));
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'emails_ai_confidence_check'
+      AND conrelid = 'public.emails'::regclass
+  ) THEN
+    EXECUTE '
+      ALTER TABLE public.emails ADD CONSTRAINT emails_ai_confidence_check
+      CHECK (ai_confidence_score IS NULL OR (ai_confidence_score >= 0 AND ai_confidence_score <= 1))
+    ';
+  END IF;
+END
+$$;
 COMMENT ON COLUMN public.emails.ai_confidence_score IS 'Confidence in AI classifications (0.0-1.0)';
 
 -- Indexes for email enrichment
@@ -61,8 +100,21 @@ ALTER TABLE public.contacts ADD COLUMN IF NOT EXISTS department VARCHAR;
 COMMENT ON COLUMN public.contacts.department IS 'Department name extracted from signature';
 
 ALTER TABLE public.contacts ADD COLUMN IF NOT EXISTS lead_score INTEGER DEFAULT 0;
-ALTER TABLE public.contacts ADD CONSTRAINT contacts_lead_score_check
-  CHECK (lead_score >= 0 AND lead_score <= 100);
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'contacts_lead_score_check'
+      AND conrelid = 'public.contacts'::regclass
+  ) THEN
+    EXECUTE '
+      ALTER TABLE public.contacts ADD CONSTRAINT contacts_lead_score_check
+      CHECK (lead_score >= 0 AND lead_score <= 100)
+    ';
+  END IF;
+END
+$$;
 COMMENT ON COLUMN public.contacts.lead_score IS 'Cumulative engagement score (0-100)';
 
 ALTER TABLE public.contacts ADD COLUMN IF NOT EXISTS lead_classification VARCHAR DEFAULT 'cold';

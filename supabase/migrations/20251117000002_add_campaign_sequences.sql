@@ -91,7 +91,7 @@ CREATE TABLE IF NOT EXISTS public.campaign_sequences (
   */
 
   -- Metadata
-  created_by UUID REFERENCES public.profiles(profile_id),
+  created_by UUID REFERENCES public.profiles(id),
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
