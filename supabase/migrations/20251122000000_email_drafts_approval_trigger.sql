@@ -38,3 +38,5 @@ EXECUTE FUNCTION public.handle_email_drafts_approval();
 
 COMMENT ON FUNCTION public.handle_email_drafts_approval() IS
 'When email_drafts.approval_status changes to approved/auto_approved, populate approved_at.';
+
+
