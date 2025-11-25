@@ -426,15 +426,15 @@ BEGIN
     RAISE NOTICE '';
     
     IF mismatch_count = 0 THEN
-        RAISE NOTICE '✅ All boolean flags synced with counters';
+        RAISE NOTICE ' All boolean flags synced with counters';
     ELSE
-        RAISE WARNING '⚠️  Found % records with boolean/counter mismatch', mismatch_count;
+        RAISE WARNING '  Found % records with boolean/counter mismatch', mismatch_count;
     END IF;
     
-    RAISE NOTICE '✅ Schema updated successfully';
-    RAISE NOTICE '✅ New columns: campaign_enrollment_id, workflow_execution_id, draft_id';
-    RAISE NOTICE '✅ Views created: campaign_performance_summary, workflow_effectiveness_summary';
-    RAISE NOTICE '✅ Helper function: get_campaign_stats(campaign_id)';
+    RAISE NOTICE ' Schema updated successfully';
+    RAISE NOTICE ' New columns: campaign_enrollment_id, workflow_execution_id, draft_id';
+    RAISE NOTICE ' Views created: campaign_performance_summary, workflow_effectiveness_summary';
+    RAISE NOTICE ' Helper function: get_campaign_stats(campaign_id)';
     RAISE NOTICE '';
     RAISE NOTICE 'Next steps:';
     RAISE NOTICE '  1. Update webhook to populate new columns from Resend tags';
