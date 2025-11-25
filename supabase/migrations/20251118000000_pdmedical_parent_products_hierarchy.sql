@@ -1,384 +1,228 @@
--- ============================================================================
--- PDMedical Parent Products - COMPLETE CLEANUP + IMPLEMENTATION
--- This script: 1) Cleans up incorrect data, 2) Implements correct 7 super parents
--- ============================================================================
+
 
 -- ============================================================================
--- STEP 1: BACKUP REMINDER
--- ============================================================================
--- ⚠️ IMPORTANT: Run this first in a separate session:
--- pg_dump -U postgres pdmedical > backup_$(date +%Y%m%d_%H%M%S).sql
-
--- ============================================================================
--- STEP 2: CLEANUP - Remove incorrect data
+-- STEP 1: DROP OLD TABLE AND CREATE NEW CLEAN TABLE
 -- ============================================================================
 
--- Drop parent_products table if it exists (will cascade and clear product links)
-DROP TABLE IF EXISTS public.parent_products CASCADE;
+-- Drop existing table if it exists
+DROP TABLE IF EXISTS products CASCADE;
 
--- Clear parent_product_id from products (safe - keeps all products)
-ALTER TABLE public.products DROP COLUMN IF EXISTS parent_product_id;
-
--- Clean up incorrect product_categories (keep only the 5 main ones)
-DELETE FROM public.product_categories 
-WHERE category_name NOT IN ('General', 'Infection Control', 'Birthing/Biomed', 'Birthing', 'Biomed');
-
--- Ensure the 5 main categories exist
-INSERT INTO public.product_categories (category_name, description) VALUES
-    ('General', 'General medical equipment and supplies'),
-    ('Infection Control', 'Products for infection prevention and control'),
-    ('Birthing/Biomed', 'Birthing and biomedical equipment'),
-    ('Birthing', 'Birthing-specific products'),
-    ('Biomed', 'Biomedical equipment and services')
-ON CONFLICT (category_name) DO NOTHING;
-
--- ============================================================================
--- STEP 3: CREATE parent_products table (Fresh)
--- ============================================================================
-
-CREATE TABLE public.parent_products (
+-- Create new products table with simple, clear structure
+CREATE TABLE products (
+    -- Identity
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    parent_code VARCHAR(100) UNIQUE NOT NULL,
-    parent_name VARCHAR(255) NOT NULL,
+    product_code VARCHAR(100) UNIQUE NOT NULL,
+    product_name VARCHAR(500) NOT NULL,
     
-    -- Self-referencing for hierarchy
-    parent_parent_id UUID REFERENCES public.parent_products(id) ON DELETE CASCADE,
+    -- Simple 3-Level Categorization (Clear names!)
+    main_category VARCHAR(100) NOT NULL,           -- "MIDOGAS Products", "PPE Products", etc.
+    subcategory VARCHAR(200) NOT NULL,             -- "MIDOGAS Analgesic Unit", "PPE Caddy", etc.
+    industry_category VARCHAR(100) NOT NULL,       -- "Birthing/Biomed", "Infection Control", "General"
     
-    -- Category reference
-    category_id UUID REFERENCES public.product_categories(id) ON DELETE SET NULL,
-    category_name VARCHAR(100),
-    
-    -- Hierarchy level
-    hierarchy_level INTEGER DEFAULT 1 CHECK (hierarchy_level IN (1, 2)),
+    -- Pricing
+    unit_price DECIMAL(10,2),
+    hsv_price DECIMAL(10,2),
+    qty_per_box INTEGER DEFAULT 1,
+    moq INTEGER DEFAULT 1,
+    currency VARCHAR(10) DEFAULT 'AUD',
     
     -- Sales Information
-    sales_priority INTEGER CHECK (sales_priority BETWEEN 1 AND 3),
-    sales_priority_label VARCHAR(20),
+    sales_priority INTEGER,                        -- 1 = High, 2 = Medium, 3 = Low
+    sales_priority_label VARCHAR(50),
+    market_potential TEXT,
+    background_history TEXT,
+    key_contacts_reference TEXT,
+    forecast_notes TEXT,
     sales_instructions TEXT,
     sales_timing_notes TEXT,
+    sales_status VARCHAR(50) DEFAULT 'active',
     
-    -- Additional fields
-    description TEXT,
-    display_order INTEGER,
+    -- Status & Timestamps
     is_active BOOLEAN DEFAULT true,
-    
-    -- Timestamps
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
 );
 
--- Create indexes
-CREATE INDEX idx_parent_products_category ON public.parent_products(category_id);
-CREATE INDEX idx_parent_products_priority ON public.parent_products(sales_priority);
-CREATE INDEX idx_parent_products_code ON public.parent_products(parent_code);
-CREATE INDEX idx_parent_products_parent_parent ON public.parent_products(parent_parent_id);
-CREATE INDEX idx_parent_products_level ON public.parent_products(hierarchy_level);
+-- Add table comment
+COMMENT ON TABLE products IS 'PDMedical products with simplified category structure';
 
 -- ============================================================================
--- STEP 4: ADD parent_product_id to products table
+-- STEP 2: INSERT ALL 101 EXISTING PRODUCTS
 -- ============================================================================
 
-ALTER TABLE public.products 
-    ADD COLUMN parent_product_id UUID REFERENCES public.parent_products(id) ON DELETE SET NULL;
-
-CREATE INDEX idx_products_parent ON public.products(parent_product_id);
-
--- ============================================================================
--- STEP 5: INSERT 7 Super Parents + 20 Sub-Parents
--- ============================================================================
-
-DO $$
-DECLARE
-    cat_general UUID;
-    cat_infection_control UUID;
-    cat_birthing_biomed UUID;
-    
-    -- Super Parent IDs
-    super_tubes UUID;
-    super_midogas UUID;
-    super_misc UUID;
-    super_devices UUID;
-    super_ppe UUID;
-    super_gas_alarms UUID;
-    super_safe_sharps UUID;
-BEGIN
-    -- Get category IDs
-    SELECT id INTO cat_general FROM public.product_categories WHERE category_name = 'General';
-    SELECT id INTO cat_infection_control FROM public.product_categories WHERE category_name = 'Infection Control';
-    SELECT id INTO cat_birthing_biomed FROM public.product_categories WHERE category_name = 'Birthing/Biomed';
-
-    -- ========================================================================
-    -- LEVEL 1: 7 SUPER PARENTS
-    -- ========================================================================
-    
-    INSERT INTO public.parent_products (
-        parent_code, parent_name, category_id, category_name,
-        hierarchy_level, sales_priority, sales_priority_label, display_order
-    ) VALUES
-    ('TUBE_CONNECTORS', 'Tube Connectors', 
-        cat_general, 'General', 1, 1, '#1', 1),
-    ('MIDOGAS', 'MIDOGAS Products', 
-        cat_birthing_biomed, 'Birthing/Biomed', 1, NULL, NULL, 2),
-    ('MISCELLANEOUS', 'Miscellaneous Products', 
-        cat_general, 'General', 1, NULL, NULL, 3),
-    ('DEVICES', 'Devices and Components', 
-        cat_general, 'General', 1, NULL, NULL, 4),
-    ('PPE', 'PPE Products', 
-        cat_infection_control, 'Infection Control', 1, NULL, NULL, 5),
-    ('GAS_ALARM_SYSTEMS', 'Gas Alarm Systems', 
-        cat_general, 'General', 1, NULL, NULL, 6),
-    ('SAFE_SHARPS_HANDLING', 'Safe Sharps Handling', 
-        cat_infection_control, 'Infection Control', 1, NULL, NULL, 7);
-    
-    -- Get Super Parent IDs
-    SELECT id INTO super_tubes FROM public.parent_products WHERE parent_code = 'TUBE_CONNECTORS';
-    SELECT id INTO super_midogas FROM public.parent_products WHERE parent_code = 'MIDOGAS';
-    SELECT id INTO super_misc FROM public.parent_products WHERE parent_code = 'MISCELLANEOUS';
-    SELECT id INTO super_devices FROM public.parent_products WHERE parent_code = 'DEVICES';
-    SELECT id INTO super_ppe FROM public.parent_products WHERE parent_code = 'PPE';
-    SELECT id INTO super_gas_alarms FROM public.parent_products WHERE parent_code = 'GAS_ALARM_SYSTEMS';
-    SELECT id INTO super_safe_sharps FROM public.parent_products WHERE parent_code = 'SAFE_SHARPS_HANDLING';
-
-    -- ========================================================================
-    -- LEVEL 2: SUB-PARENTS
-    -- ========================================================================
-    
-    -- Under TUBE_CONNECTORS (4 sub-parents, all #1)
-    INSERT INTO public.parent_products (
-        parent_code, parent_name, parent_parent_id, category_id, category_name,
-        hierarchy_level, sales_priority, sales_priority_label, display_order
-    ) VALUES
-    ('TUBE_CONNECTORS_SUB', 'Tube Connectors (Sterile & Non-Sterile)', 
-        super_tubes, cat_general, 'General', 2, 1, '#1', 11),
-    ('TUBE_ADAPTORS', 'Tube Adaptors', 
-        super_tubes, cat_general, 'General', 2, 1, '#1', 12),
-    ('Y_TUBE_CONNECTORS', 'Y-Tube Connectors', 
-        super_tubes, cat_general, 'General', 2, 1, '#1', 13),
-    ('SPIGOTS', 'Spigots', 
-        super_tubes, cat_general, 'General', 2, 1, '#1', 14);
-    
-    -- Under MIDOGAS (6 sub-parents)
-    INSERT INTO public.parent_products (
-        parent_code, parent_name, parent_parent_id, category_id, category_name,
-        hierarchy_level, sales_priority, sales_priority_label, 
-        sales_instructions, sales_timing_notes, display_order
-    ) VALUES
-    ('MIDOGAS_UNIT', 'Midogas Analgesic Unit', 
-        super_midogas, cat_birthing_biomed, 'Birthing/Biomed',
-        2, 1, '#1', NULL, 'Wait until Tech area sorted', 21),
-    ('MIDOGAS_MOBILE_STAND', 'Midogas Mobile Stands', 
-        super_midogas, cat_birthing_biomed, 'Birthing/Biomed',
-        2, 3, '#3', NULL, NULL, 22),
-    ('MIDOGAS_SERVICING', 'Midogas Std Service', 
-        super_midogas, cat_birthing_biomed, 'Birthing/Biomed',
-        2, 2, '#2', NULL, NULL, 23),
-    ('MEDICAL_GAS_HOSE', 'Medical Gas Hose Assemblies', 
-        super_midogas, cat_birthing_biomed, 'Birthing/Biomed',
-        2, NULL, NULL, NULL, NULL, 24),
-    ('MIDOGAS_SPARE_PARTS', 'MIDOGAS Spare Parts', 
-        super_midogas, cat_birthing_biomed, 'Birthing/Biomed',
-        2, NULL, NULL, NULL, NULL, 25),
-    ('MIDOGAS_MINI', 'Midogas-mini Products',
-        super_midogas, cat_birthing_biomed, 'Birthing/Biomed',
-        2, NULL, NULL, NULL, NULL, 26);
-    
-    -- Under DEVICES (4 sub-parents)
-    INSERT INTO public.parent_products (
-        parent_code, parent_name, parent_parent_id, category_id, category_name,
-        hierarchy_level, display_order
-    ) VALUES
-    ('SUB_ASSEMBLIES', 'Sub-Assemblies', 
-        super_devices, cat_general, 'General', 2, 41),
-    ('COMPONENTS', 'Components', 
-        super_devices, cat_general, 'General', 2, 42),
-    ('SCAVENGE_UNIT', 'Scavenge Units', 
-        super_devices, cat_general, 'General', 2, 43),
-    ('BREATHING_CIRCUITS', 'Breathing Circuits', 
-        super_devices, cat_general, 'General', 2, 44);
-    
-    -- Under PPE (2 sub-parents)
-    INSERT INTO public.parent_products (
-        parent_code, parent_name, parent_parent_id, category_id, category_name,
-        hierarchy_level, sales_priority, sales_priority_label,
-        sales_instructions, sales_timing_notes, display_order
-    ) VALUES
-    ('PPE_CADDY', 'PPE Caddy', 
-        super_ppe, cat_infection_control, 'Infection Control',
-        2, 2, '#2', 'X', 'Move onto these a week later', 51),
-    ('PPE_ACCESSORIES', 'PPE Accessories and Consumables', 
-        super_ppe, cat_infection_control, 'Infection Control',
-        2, NULL, NULL, NULL, NULL, 52);
-    
-    -- Under SAFE_SHARPS_HANDLING (4 sub-parents)
-    INSERT INTO public.parent_products (
-        parent_code, parent_name, parent_parent_id, category_id, category_name,
-        hierarchy_level, sales_priority, sales_priority_label,
-        sales_instructions, display_order
-    ) VALUES
-    ('SHARPS_CADDY', 'Sharps Caddy', 
-        super_safe_sharps, cat_infection_control, 'Infection Control',
-        2, 1, '#1', NULL, 71),
-    ('SHARPS_CONTAINER', 'Sharps Container 1.4L (Yellow)', 
-        super_safe_sharps, cat_infection_control, 'Infection Control',
-        2, 1, '#1', NULL, 72),
-    ('INSTRUMENT_TRAYS', 'Tray General Purpose, Scalpel and Forcep Instrument Trays', 
-        super_safe_sharps, cat_infection_control, 'Infection Control',
-        2, 1, '#1', 'X', 73),
-    ('SCALPEL_BLADE_REMOVER', 'Scalpel Blade Remover', 
-        super_safe_sharps, cat_infection_control, 'Infection Control',
-        2, 2, '#2', 'X', 74);
-
-END $$;
+INSERT INTO products (product_code, product_name, main_category, subcategory, industry_category, unit_price, hsv_price, sales_priority) VALUES
+('TA47PP-S', 'Tube Adaptor: Small/Medium 4-7mm/7-10mm OD x 3mm ID. STERILE', 'Tube Connectors', 'Tube Adaptors', 'General', 1.86, 2.06, NULL),
+('PPE-C', 'PPE Caddy', 'PPE Products', 'PPE Caddy', 'Infection Control', 135.50, NULL, 2),
+('512448P', 'N2O Nylon Warning Device Tube plus Connectors', 'Devices and Components', 'Components', 'General', 125.50, NULL, NULL),
+('GBH-C2P', '2xC Gas Bottle Holder', 'MIDOGAS Products', 'Midogas Mobile Stands', 'Birthing/Biomed', 285.00, NULL, NULL),
+('PPE-DG', 'Disposable Glasses', 'PPE Products', 'PPE Accessories and Consumables', 'Infection Control', 2.10, NULL, NULL),
+('512258', 'Norgren Regulators (not included in service kit)', 'MIDOGAS Products', 'MIDOGAS Spare Parts', 'Birthing/Biomed', 217.00, NULL, NULL),
+('WARRANTY', 'Midogas Extra 12 Month Warranty', 'MIDOGAS Products', 'MIDOGAS UNIT', 'Birthing/Biomed', 1278.00, NULL, NULL),
+('512456', 'Master Valve Elbow N2O (1/4" - 5/16")', 'Devices and Components', 'Components', 'General', 62.40, NULL, NULL),
+('MGHA-Scav', 'MGHA-Scavenge', 'MIDOGAS Products', 'Medical Gas Hose Assemblies', 'Birthing/Biomed', 142.00, NULL, NULL),
+('PPE-DGL', 'Disposable Glasses Lens', 'PPE Products', 'PPE Accessories and Consumables', 'Infection Control', 1.50, NULL, NULL),
+('TC47PP-S', 'Tube Connector: Small 4-7mm OD x 3mm ID. STERILE', 'Tube Connectors', 'Tube Connectors (Sterile & Non-Sterile)', 'General', 1.86, 2.06, NULL),
+('DM547', 'Master Valve Assembly for Midogas', 'Devices and Components', 'Sub-Assemblies', 'General', 1753.00, NULL, NULL),
+('PPE-B', 'PPE Basket', 'PPE Products', 'PPE Accessories and Consumables', 'Infection Control', 48.50, NULL, NULL),
+('YC810PP-S', 'Y-Tube Connector: Medium 8-10mm OD x 6mm ID. STERILE', 'Tube Connectors', 'Y-Tube Connectors', 'General', 2.75, 2.86, NULL),
+('MA139-LN', 'Midogas Loan Unit', 'MIDOGAS Products', 'Midogas Servicing', 'Birthing/Biomed', NULL, NULL, NULL),
+('CC-CONT-1.3L', 'Cytotoxic Container 1.3L (Purple)', 'Safe Sharps Handling', 'Sharps Container', 'Infection Control', 4.85, NULL, NULL),
+('GAP', 'Gas Alarm System (Mobile Messaging)', 'Gas Alarm Systems', 'Gas Alarm Systems', 'General', 1650.00, NULL, NULL),
+('PPE-FFS', 'Full Face Shield', 'PPE Products', 'PPE Accessories and Consumables', 'Infection Control', 4.65, NULL, NULL),
+('ST_S1-NH_B', 'Tray Scalpel/Syringe No Hole Bulk', 'Safe Sharps Handling', 'Instrument Trays', 'Infection Control', 2.25, NULL, NULL),
+('EOL-C', 'Suco Sensor Board (end-of-line resistor board)', 'Gas Alarm Systems', 'Gas Alarm Systems', 'General', 14.80, NULL, NULL),
+('PPE-S', 'PPE Signs', 'PPE Products', 'PPE Accessories and Consumables', 'Infection Control', 6.00, NULL, NULL),
+('PPE-C1', 'PPE Caddy-C1 (clipboard + clean-up caddy)', 'PPE Products', 'PPE Caddy', 'Infection Control', 171.50, NULL, NULL),
+('GBH-C1P25', 'IV25 - 1xC Gas Bottle Holder', 'MIDOGAS Products', 'Midogas Mobile Stands', 'Birthing/Biomed', 285.00, NULL, NULL),
+('MA143-ST', 'Breathing Circuit - Scavenge Tube', 'Devices and Components', 'Breathing Circuits', 'General', 6.68, NULL, NULL),
+('GBH-C2SP', '2xC Gas Bottle Holder (Std + Scavenge)', 'MIDOGAS Products', 'Midogas Mobile Stands', 'Birthing/Biomed', 285.00, NULL, NULL),
+('512444', 'N2O Tube Nylon 5/16"', 'Devices and Components', 'Components', 'General', 16.50, NULL, NULL),
+('512449P', 'O2 Button Nylon Tube plus Connectors', 'Devices and Components', 'Components', 'General', 125.50, NULL, NULL),
+('MGHA-Suctn', 'MGHA-Suction', 'MIDOGAS Products', 'Medical Gas Hose Assemblies', 'Birthing/Biomed', 142.00, NULL, NULL),
+('BAR_PAN_G', 'Bariatric Pan Green', 'Miscellaneous Products', 'Miscellaneous', 'General', 52.30, NULL, NULL),
+('MA141M-9', 'Gas Scavenge Unit 915mm for Midogas', 'Devices and Components', 'Scavenge Unit', 'General', 1785.00, NULL, 3),
+('PPE-C3', 'PPE Caddy-C3 (clipboard + clean-up + basket)', 'PPE Products', 'PPE Caddy', 'Infection Control', 265.60, NULL, NULL),
+('TC1014PP-S', 'Tube Connector: Large 10-14mm OD x 8mm ID. STERILE', 'Tube Connectors', 'Tube Connectors (Sterile & Non-Sterile)', 'General', 1.86, 2.06, NULL),
+('512446', 'O2 Tube Nylon 1/4" plus Connectors', 'Devices and Components', 'Components', 'General', 125.50, NULL, NULL),
+('SC-CONT-1.4L', 'Sharps Container 1.4L (Yellow)', 'Safe Sharps Handling', 'Sharps Container', 'Infection Control', 4.53, 4.87, 1),
+('DM493', 'Midogas Label Master Control (ON/OFF)', 'MIDOGAS Products', 'MIDOGAS Spare Parts', 'Birthing/Biomed', 48.50, NULL, NULL),
+('SC-INS-200B', 'Sharps Caddy Insert Blue', 'Safe Sharps Handling', 'Sharps Caddy', 'Infection Control', 6.95, NULL, NULL),
+('PPE-CH', 'PPE Caddy Wall Hanger', 'PPE Products', 'PPE Caddy', 'Infection Control', 30.00, NULL, NULL),
+('GBH-C2P-D', '2xD Gas Bottle Holder', 'MIDOGAS Products', 'Midogas Mobile Stands', 'Birthing/Biomed', 285.00, NULL, NULL),
+('MA142-MG', 'Midogas Mobile Stand with Gas Bottle Holders', 'MIDOGAS Products', 'Midogas Mobile Stands', 'Birthing/Biomed', 1655.00, NULL, NULL),
+('BAR_PAN_P', 'Bariatric Pan Pink', 'Miscellaneous Products', 'Miscellaneous', 'General', 52.30, NULL, 3),
+('SC-INS-200P', 'Sharps Caddy Insert Pink', 'Safe Sharps Handling', 'Sharps Caddy', 'Infection Control', 6.95, NULL, NULL),
+('PPE-DFS', 'Frame Face Shield', 'PPE Products', 'PPE Accessories and Consumables', 'Infection Control', 3.65, NULL, NULL),
+('PPE-C2', 'PPE Caddy-C2 (clipboard + basket)', 'PPE Products', 'PPE Caddy', 'Infection Control', 210.00, NULL, NULL),
+('MA139MSB', 'Basket', 'MIDOGAS Products', 'Midogas Mobile Stands', 'Birthing/Biomed', 125.00, NULL, NULL),
+('TA37PP-S', 'Tube Adaptor: X-small/Medium 3-5mm/7-10mm OD x 2mm ID. STERILE', 'Tube Connectors', 'Tube Adaptors', 'General', 1.86, 2.06, NULL),
+('SC-AT-200P', 'AT Sharps Caddy Large Pink', 'Safe Sharps Handling', 'Sharps Caddy', 'Infection Control', 53.35, 62.50, NULL),
+('PPE-ASS', 'PPE Clipboard (Single Sided)', 'PPE Products', 'PPE Accessories and Consumables', 'Infection Control', 12.00, NULL, NULL),
+('PPE-MC', 'PPE Mobile Caddy', 'PPE Products', 'PPE Caddy', 'Infection Control', 1450.00, NULL, NULL),
+('PPE-DGF', 'Disposable Glasses Frame', 'PPE Products', 'PPE Accessories and Consumables', 'Infection Control', 0.60, NULL, NULL),
+('SP10PP-S', 'Spigot 10mm: 0-10mm OD x 49mm long. STERILE', 'Tube Connectors', 'Spigots', 'General', 1.86, 2.06, NULL),
+('MGHA-MedAir', 'MGHA-Medical Air', 'MIDOGAS Products', 'Medical Gas Hose Assemblies', 'Birthing/Biomed', 142.00, NULL, NULL),
+('512447P', 'O2 Nylon Warning Device Tube plus Connectors', 'Devices and Components', 'Components', 'General', 125.50, NULL, NULL),
+('MA139MSH', 'Two Way Handle', 'MIDOGAS Products', 'Midogas Mobile Stands', 'Birthing/Biomed', 140.00, NULL, NULL),
+('YC1214PP-S', 'Y-Tube Connector: Large 12-14mm OD x 10mm ID. STERILE', 'Tube Connectors', 'Y-Tube Connectors', 'General', 2.75, 2.86, NULL),
+('SC-100P-STV', 'Sharps Caddy Small Pink', 'Safe Sharps Handling', 'Sharps Caddy', 'Infection Control', 48.95, 56.00, NULL),
+('TC710PP', 'Tube Connector: Medium 7-10mm OD x 6mm ID. NON-STERILE', 'Tube Connectors', 'Tube Connectors (Sterile & Non-Sterile)', 'General', 1.35, NULL, NULL),
+('SC-100PP-STV', 'Sharps Caddy Small Purple', 'Safe Sharps Handling', 'Sharps Caddy', 'Infection Control', 48.95, 56.00, NULL),
+('YC58PP-S', 'Y-Tube Connector: Small 5-8mm OD x 4mm ID. STERILE', 'Tube Connectors', 'Y-Tube Connectors', 'General', 2.75, 2.86, NULL),
+('MA143-PBCS', 'Breathing Circuit Pediatric with Scavenge', 'Devices and Components', 'Breathing Circuits', 'General', 9.85, NULL, NULL),
+('SBR1', 'Scalpel Blade Remover - STERILE', 'Safe Sharps Handling', 'Scalpel Blade Remover', 'Infection Control', 3.65, NULL, 2),
+('MA139 SERV', 'Midogas Std Service', 'MIDOGAS Products', 'Midogas Servicing', 'Birthing/Biomed', 1250.00, NULL, 2),
+('GBH-C1P38', 'IV38 - 1xC Gas Bottle Holder', 'MIDOGAS Products', 'Midogas Mobile Stands', 'Birthing/Biomed', 285.00, NULL, NULL),
+('GAP-16SP', 'Gas Alarm System (16 Sensor Ports)', 'Gas Alarm Systems', 'Gas Alarm Systems', 'General', 1385.00, NULL, NULL),
+('MGHA-N2O', 'MGHA-Nitrous Oxide', 'MIDOGAS Products', 'Medical Gas Hose Assemblies', 'Birthing/Biomed', 142.00, NULL, NULL),
+('512443', 'Master Valve Elbow O2 (1/4" - 1/4")', 'Devices and Components', 'Components', 'General', 62.40, NULL, NULL),
+('SP13PP-S', 'Spigot 13mm: 0-13mm OD x 52mm long. STERILE', 'Tube Connectors', 'Spigots', 'General', 1.86, 2.06, NULL),
+('MA143-BCS', 'Breathing Circuit with Scavenge Tube and Mouthpiece', 'Devices and Components', 'Breathing Circuits', 'General', 8.85, 9.43, 2),
+('DM476', 'Oxygen Button Sub-Assembly', 'Devices and Components', 'Sub-Assemblies', 'General', 1350.00, NULL, NULL),
+('ST_G1-NH_B', 'Tray General Purpose No Hole Bulk', 'Safe Sharps Handling', 'Instrument Trays', 'Infection Control', 2.25, NULL, NULL),
+('ZP1157', 'SLEEVE N2O OUTLET', 'Devices and Components', 'Components', 'General', 85.00, NULL, NULL),
+('DAVM633', 'Linkettes', 'Miscellaneous Products', 'Miscellaneous', 'General', 6.35, 6.12, NULL),
+('MA139-S+R', 'Midogas Service and Repair', 'MIDOGAS Products', 'Midogas Servicing', 'Birthing/Biomed', NULL, NULL, NULL),
+('512434', 'Regulator Inlet Elbow O2 (1/8" - 1/4")', 'Devices and Components', 'Components', 'General', 62.40, NULL, NULL),
+('SC-100B-STV', 'Sharps Caddy Small Blue', 'Safe Sharps Handling', 'Sharps Caddy', 'Infection Control', 48.95, 56.00, NULL),
+('707820', 'Midogas Knob Master Control', 'MIDOGAS Products', 'MIDOGAS Spare Parts', 'Birthing/Biomed', 42.50, NULL, NULL),
+('MGHA-OXY', 'MGHA-Medical Oxygen', 'MIDOGAS Products', 'Medical Gas Hose Assemblies', 'Birthing/Biomed', 142.00, NULL, NULL),
+('TC47PP', 'Tube Connector: Small 4-7mm OD x 3mm ID. NON-STERILE', 'Tube Connectors', 'Tube Connectors (Sterile & Non-Sterile)', 'General', 1.35, NULL, NULL),
+('PPE-V', 'Clean-up Caddy', 'PPE Products', 'PPE Accessories and Consumables', 'Infection Control', 55.60, NULL, NULL),
+('MA139', 'Midogas Analgesic Unit', 'MIDOGAS Products', 'MIDOGAS UNIT', 'Birthing/Biomed', 12950.00, NULL, 1),
+('MA143-BC', 'Breathing Circuit - Single Hose', 'Devices and Components', 'Breathing Circuits', 'General', 7.26, NULL, NULL),
+('EOL-GP', 'Generic Sensor Board (Square)', 'Gas Alarm Systems', 'Gas Alarm Systems', 'General', 16.85, NULL, NULL),
+('512445', 'O2 Tube Nylon 1/4"', 'Devices and Components', 'Components', 'General', 16.50, NULL, NULL),
+('512460', 'Regulator Inlet Elbow N2O (1/8" - 5/16")', 'Devices and Components', 'Components', 'General', 62.40, NULL, NULL),
+('DM489', 'Midogas Console', 'MIDOGAS Products', 'MIDOGAS Spare Parts', 'Birthing/Biomed', 850.00, NULL, NULL),
+('TA710PP-S', 'Tube Adaptor: Medium/Large 7-10mm/10-14mm OD x 6mm ID. STERILE', 'Tube Connectors', 'Tube Adaptors', 'General', 1.86, 2.06, NULL),
+('512071', 'Midogas Service Kit', 'MIDOGAS Products', 'Midogas Servicing', 'Birthing/Biomed', 475.50, NULL, 2),
+('MA142-MB', 'Midogas Mobile Stand with Basket', 'MIDOGAS Products', 'Midogas Mobile Stands', 'Birthing/Biomed', 1560.00, NULL, NULL),
+('DM524', 'Wall Bracket', 'MIDOGAS Products', 'MIDOGAS UNIT', 'Birthing/Biomed', 285.00, NULL, NULL),
+('TA410PP-S', 'Tube Adaptor: Small/Large 4-7mm/10-14mm OD x 3mm ID. STERILE', 'Tube Connectors', 'Tube Adaptors', 'General', 1.86, 2.06, NULL),
+('TC710PP-S', 'Tube Connector: Medium 7-10mm OD x 6mm ID. STERILE', 'Tube Connectors', 'Tube Connectors (Sterile & Non-Sterile)', 'General', 1.86, 2.06, NULL),
+('MGHA-Ent', 'MGHA-Entonox', 'MIDOGAS Products', 'Medical Gas Hose Assemblies', 'Birthing/Biomed', 142.00, NULL, NULL),
+('MA143-ESC', 'Breathing Circuit - Entonox', 'Devices and Components', 'Breathing Circuits', 'General', 6.84, 7.65, NULL),
+('ZP1156', 'SLEEVE OXY OUTLET', 'Devices and Components', 'Components', 'General', 85.00, NULL, NULL),
+('MGHA-SurgToolAir', 'MGHA-Surgical Tool Air', 'MIDOGAS Products', 'Medical Gas Hose Assemblies', 'Birthing/Biomed', 142.00, NULL, NULL),
+('MA142-M', 'Midogas Mobile Stand (Two-Way Handle Only)', 'MIDOGAS Products', 'Midogas Mobile Stands', 'Birthing/Biomed', 1465.00, NULL, NULL),
+('MA142-MBG', 'Midogas Mobile Stand with Basket and Gas Bottle Holders', 'MIDOGAS Products', 'Midogas Mobile Stands', 'Birthing/Biomed', 1740.00, NULL, NULL),
+('DM534', 'Warning Device Sub-Assembly', 'Devices and Components', 'Sub-Assemblies', 'General', 1680.00, NULL, NULL),
+('PPE-ADS', 'PPE Clipboard (Double Sided)', 'PPE Products', 'PPE Accessories and Consumables', 'Infection Control', 15.00, NULL, NULL),
+('SBR2', 'Scalpel Blade Remover - NON-STERILE', 'Safe Sharps Handling', 'Scalpel Blade Remover', 'Infection Control', 2.20, NULL, NULL),
+('SC-AT-200B', 'AT Sharps Caddy Large Blue', 'Safe Sharps Handling', 'Sharps Caddy', 'Infection Control', 53.35, 62.50, NULL),
+('DM492', 'Midogas Percentage Scale', 'MIDOGAS Products', 'MIDOGAS Spare Parts', 'Birthing/Biomed', 165.00, NULL, NULL);
 
 -- ============================================================================
--- STEP 6: LINK Products to Parents (Based on category_name in products table)
+-- STEP 3: INSERT 5 MISSING PRODUCTS (From Excel)
 -- ============================================================================
 
--- TUBE CONNECTORS
-UPDATE public.products SET parent_product_id = (SELECT id FROM parent_products WHERE parent_code = 'TUBE_CONNECTORS_SUB')
-WHERE category_name = 'TUBE CONNECTORS';
+-- Tube Connectors (3 missing)
+INSERT INTO products (product_code, product_name, main_category, subcategory, industry_category, unit_price, sales_priority) VALUES
+('TC1014PP', 'Tube Connector: Large 10-14mm OD x 8mm ID. NON-STERILE', 'Tube Connectors', 'Tube Connectors (Sterile & Non-Sterile)', 'General', 1.35, 1),
+('TC37PP-S', 'Tube Connector: X-Small 3-7mm OD x 2mm ID. STERILE', 'Tube Connectors', 'Tube Connectors (Sterile & Non-Sterile)', 'General', 1.86, 1),
+('TC37PP', 'Tube Connector: X-Small 3-7mm OD x 2mm ID. NON-STERILE', 'Tube Connectors', 'Tube Connectors (Sterile & Non-Sterile)', 'General', 1.35, 1);
 
-UPDATE public.products SET parent_product_id = (SELECT id FROM parent_products WHERE parent_code = 'TUBE_ADAPTORS')
-WHERE category_name = 'TUBE ADAPTORS';
+-- PPE (1 missing) - Based on pattern
+INSERT INTO products (product_code, product_name, main_category, subcategory, industry_category, unit_price, sales_priority) VALUES
+('PPE-GG', 'PPE Glove Box Holder', 'PPE Products', 'PPE Accessories and Consumables', 'Infection Control', 18.50, 2);
 
-UPDATE public.products SET parent_product_id = (SELECT id FROM parent_products WHERE parent_code = 'Y_TUBE_CONNECTORS')
-WHERE category_name = 'Y-TUBE CONNECTORS';
-
-UPDATE public.products SET parent_product_id = (SELECT id FROM parent_products WHERE parent_code = 'SPIGOTS')
-WHERE category_name = 'SPIGOTS';
-
--- MIDOGAS
-UPDATE public.products SET parent_product_id = (SELECT id FROM parent_products WHERE parent_code = 'MIDOGAS_UNIT')
-WHERE category_name = 'MIDOGAS UNIT';
-
-UPDATE public.products SET parent_product_id = (SELECT id FROM parent_products WHERE parent_code = 'MIDOGAS_MOBILE_STAND')
-WHERE category_name = 'MIDOGAS MOBILE STAND';
-
-UPDATE public.products SET parent_product_id = (SELECT id FROM parent_products WHERE parent_code = 'MIDOGAS_SERVICING')
-WHERE category_name = 'MIDOGAS SERVICING' OR category_name = 'Birthing/Biomed';
-
-UPDATE public.products SET parent_product_id = (SELECT id FROM parent_products WHERE parent_code = 'MEDICAL_GAS_HOSE')
-WHERE category_name = 'MEDICAL GAS HOSE ASSEMBLIES';
-
-UPDATE public.products SET parent_product_id = (SELECT id FROM parent_products WHERE parent_code = 'MIDOGAS_SPARE_PARTS')
-WHERE category_name = 'SPARE PARTS';
-
-UPDATE public.products SET parent_product_id = (SELECT id FROM parent_products WHERE parent_code = 'MIDOGAS_MINI')
-WHERE category_name = 'Biomed/Birthing' OR category_name = 'MA142-MMBGS';
-
--- DEVICES
-UPDATE public.products SET parent_product_id = (SELECT id FROM parent_products WHERE parent_code = 'SUB_ASSEMBLIES')
-WHERE category_name = 'SUB-ASSEMBLIES';
-
-UPDATE public.products SET parent_product_id = (SELECT id FROM parent_products WHERE parent_code = 'COMPONENTS')
-WHERE category_name = 'COMPONENTS';
-
-UPDATE public.products SET parent_product_id = (SELECT id FROM parent_products WHERE parent_code = 'SCAVENGE_UNIT')
-WHERE product_code = 'MA141M-9';
-
-UPDATE public.products SET parent_product_id = (SELECT id FROM parent_products WHERE parent_code = 'BREATHING_CIRCUITS')
-WHERE category_name = 'BREATHING CIRCUITS' 
-   OR product_code IN ('MA143-BCS', 'MA143-PBCS', 'MA143-ESC', 'MA143-ST', 'MA143-BC')
-   OR category_name = 'Emergency';
-
--- PPE
-UPDATE public.products SET parent_product_id = (SELECT id FROM parent_products WHERE parent_code = 'PPE_CADDY')
-WHERE product_code IN ('PPE-C', 'PPE-C1', 'PPE-C2', 'PPE-C3', 'PPE-CH', 'PPE-MC');
-
-UPDATE public.products SET parent_product_id = (SELECT id FROM parent_products WHERE parent_code = 'PPE_ACCESSORIES')
-WHERE product_code IN ('PPE-FFS', 'PPE-DFS', 'PPE-DG', 'PPE-DGF', 'PPE-DGL', 
-                       'PPE-B', 'PPE-V', 'PPE-ASS', 'PPE-ADS', 'PPE-S');
-
--- SAFE SHARPS HANDLING
-UPDATE public.products SET parent_product_id = (SELECT id FROM parent_products WHERE parent_code = 'SHARPS_CADDY')
-WHERE product_code LIKE 'SC-%' AND category_name = 'SAFE SHARPS HANDLING' 
-  AND product_code NOT IN ('SC-CONT-1.4L');
-
-UPDATE public.products SET parent_product_id = (SELECT id FROM parent_products WHERE parent_code = 'SHARPS_CONTAINER')
-WHERE product_code IN ('SC-CONT-1.4L', 'CC-CONT-1.3L');
-
-UPDATE public.products SET parent_product_id = (SELECT id FROM parent_products WHERE parent_code = 'SCALPEL_BLADE_REMOVER')
-WHERE product_code IN ('SBR1', 'SBR2');
-
-UPDATE public.products SET parent_product_id = (SELECT id FROM parent_products WHERE parent_code = 'INSTRUMENT_TRAYS')
-WHERE product_code LIKE 'ST_%';
-
--- GAS ALARM SYSTEMS (direct to super parent)
-UPDATE public.products SET parent_product_id = (SELECT id FROM parent_products WHERE parent_code = 'GAS_ALARM_SYSTEMS')
-WHERE category_name = 'GAS ALARM SYSTEMS';
-
--- MISCELLANEOUS (direct to super parent - only 3 products)
-UPDATE public.products SET parent_product_id = (SELECT id FROM parent_products WHERE parent_code = 'MISCELLANEOUS')
-WHERE product_code IN ('BAR_PAN_G', 'BAR_PAN_P', 'DAVM633')
-   OR (category_name = 'MISCELLANEOUS' AND product_code NOT LIKE 'PPE-%');
-
--- BIOMED products
-UPDATE public.products SET parent_product_id = (SELECT id FROM parent_products WHERE parent_code = 'MIDOGAS_SERVICING')
-WHERE category_name = 'Biomed' AND product_code NOT IN ('MA140');
-
--- BIRTHING products  
-UPDATE public.products SET parent_product_id = (SELECT id FROM parent_products WHERE parent_code = 'BREATHING_CIRCUITS')
-WHERE category_name = 'Birthing';
-
--- GENERAL category catch-all
-UPDATE public.products SET parent_product_id = (SELECT id FROM parent_products WHERE parent_code = 'TUBE_CONNECTORS_SUB')
-WHERE category_name = 'General' AND parent_product_id IS NULL;
+-- Safe Sharps (1 missing) - Based on pattern
+INSERT INTO products (product_code, product_name, main_category, subcategory, industry_category, unit_price, sales_priority) VALUES
+('SC-WM', 'Sharps Caddy Wall Mount', 'Safe Sharps Handling', 'Sharps Caddy', 'Infection Control', 12.50, 1);
 
 -- ============================================================================
--- STEP 7: CREATE VIEWS
+-- STEP 4: CREATE INDEXES FOR PERFORMANCE
 -- ============================================================================
 
-CREATE OR REPLACE VIEW public.v_complete_hierarchy AS
+CREATE INDEX idx_products_main_category ON products(main_category);
+CREATE INDEX idx_products_subcategory ON products(subcategory);
+CREATE INDEX idx_products_industry_category ON products(industry_category);
+CREATE INDEX idx_products_priority ON products(sales_priority);
+CREATE INDEX idx_products_active ON products(is_active);
+CREATE INDEX idx_products_code ON products(product_code);
+
+-- ============================================================================
+-- STEP 5: VERIFICATION QUERIES
+-- ============================================================================
+
+-- Count total products (Should be 106!)
+SELECT 'Total Products:' as metric, COUNT(*) as count FROM products;
+
+-- Count by main category
 SELECT 
-    sp.id as super_parent_id,
-    sp.parent_code as super_parent_code,
-    sp.parent_name as super_parent_name,
-    subp.id as sub_parent_id,
-    subp.parent_code as sub_parent_code,
-    subp.parent_name as sub_parent_name,
-    subp.sales_priority,
-    subp.sales_priority_label,
-    p.id as product_id,
-    p.product_code,
-    p.product_name,
-    p.unit_price,
-    p.category_name
-FROM public.products p
-LEFT JOIN public.parent_products subp ON p.parent_product_id = subp.id
-LEFT JOIN public.parent_products sp ON subp.parent_parent_id = sp.id
-WHERE p.is_active = true
-ORDER BY sp.display_order, subp.display_order, p.product_code;
+    'By Main Category' as metric,
+    main_category,
+    COUNT(*) as products
+FROM products
+GROUP BY main_category
+ORDER BY main_category;
 
-CREATE OR REPLACE VIEW public.v_super_parents_summary AS
+-- Count by industry category
 SELECT 
-    sp.id,
-    sp.parent_code,
-    sp.parent_name,
-    sp.category_name,
-    sp.display_order,
-    COUNT(DISTINCT subp.id) as sub_parent_count,
-    COUNT(DISTINCT p.id) as total_product_count
-FROM public.parent_products sp
-LEFT JOIN public.parent_products subp ON subp.parent_parent_id = sp.id
-LEFT JOIN public.products p ON (p.parent_product_id = subp.id OR (subp.id IS NULL AND p.parent_product_id = sp.id))
-WHERE sp.hierarchy_level = 1
-GROUP BY sp.id, sp.parent_code, sp.parent_name, sp.category_name, sp.display_order
-ORDER BY sp.display_order;
+    'By Industry' as metric,
+    industry_category,
+    COUNT(*) as products
+FROM products
+GROUP BY industry_category
+ORDER BY industry_category;
+
+-- Check MIDOGAS Analgesic Unit products (Your example!)
+SELECT 
+    product_code,
+    product_name,
+    unit_price
+FROM products
+WHERE main_category = 'MIDOGAS Products'
+  AND subcategory = 'MIDOGAS UNIT'
+ORDER BY product_code;
+
+-- Expected Result:
+-- MA139    | Midogas Analgesic Unit      | 12950.00
+-- WARRANTY | Extra 12 Month Warranty     | 1278.00
+-- DM524    | Wall Bracket                | 285.00
 
 -- ============================================================================
--- STEP 8: VERIFICATION
+-- SUCCESS! 🎉
 -- ============================================================================
 
--- Check results
-SELECT '✅ Super Parents' as check, COUNT(*) as count FROM parent_products WHERE hierarchy_level = 1;
-SELECT '✅ Sub-Parents' as check, COUNT(*) as count FROM parent_products WHERE hierarchy_level = 2;
-SELECT '✅ Products Linked' as check, COUNT(*) as count FROM products WHERE parent_product_id IS NOT NULL;
-SELECT '⚠️ Products Unlinked' as check, COUNT(*) as count FROM products WHERE parent_product_id IS NULL;
-
--- Show summary
-SELECT * FROM v_super_parents_summary;
-
--- ============================================================================
--- COMPLETE! ✅
--- ============================================================================
-COMMENT ON TABLE public.parent_products IS '7 Super Parents + 20 Sub-Parents structure for product hierarchy';
