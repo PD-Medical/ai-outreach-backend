@@ -1,0 +1,11 @@
+# Environment variables
+.env
+.env.local
+
+# Deno
+deno.lock
+
+# Logs
+*.log
+
+
