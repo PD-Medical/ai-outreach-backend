@@ -120,3 +120,5 @@ INSERT INTO public.role_permissions VALUES ('sales', false, false, true, true, t
 INSERT INTO public.role_permissions VALUES ('accounts', false, false, true, true, true, false, true, true, true, '2025-11-21 12:23:50.054592+00', true, true);
 INSERT INTO public.role_permissions VALUES ('management', false, false, true, false, true, false, true, true, true, '2025-11-21 12:23:50.054592+00', true, true);
 INSERT INTO public.system_config VALUES ('workflow_matcher_url', '"http://host.docker.internal:3001/workflow-matcher"', 'URL for workflow-matcher Lambda function', '2025-11-23 07:05:09.9592');
+INSERT INTO public.system_config VALUES ('campaign_scheduler_url', '"http://host.docker.internal:3001/campaign-scheduler"', 'URL for campaign-scheduler Lambda function (pg_cron)', '2025-12-01 00:00:00');
+INSERT INTO public.system_config VALUES ('campaign_executor_url', '"http://host.docker.internal:3001/campaign-executor"', 'URL for campaign-executor Lambda function (pg_cron)', '2025-12-01 00:00:00');
