@@ -13,9 +13,6 @@
 -- PostgreSQL database dump
 --
 
-\restrict 1GKsagdZzdzFdDlSHmXeUa31FoKKTuwVjoWk31bGYul4VwcyK9ZvF8j9tDQdhdE
-
-
 SET statement_timeout = 0;
 SET lock_timeout = 0;
 SET idle_in_transaction_session_timeout = 0;
@@ -32,7 +29,7 @@ SET row_security = off;
 -- Name: public; Type: SCHEMA; Schema: -; Owner: -
 --
 
-CREATE SCHEMA public;
+CREATE SCHEMA IF NOT EXISTS public;
 
 
 --
@@ -4828,6 +4825,4 @@ ALTER TABLE public.workflows ENABLE ROW LEVEL SECURITY;
 --
 -- PostgreSQL database dump complete
 --
-
-\unrestrict 1GKsagdZzdzFdDlSHmXeUa31FoKKTuwVjoWk31bGYul4VwcyK9ZvF8j9tDQdhdE
 
