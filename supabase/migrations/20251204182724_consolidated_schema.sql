@@ -2287,7 +2287,9 @@ CREATE TABLE public.role_permissions (
     manage_approvals boolean DEFAULT false NOT NULL,
     updated_at timestamp with time zone DEFAULT timezone('utc'::text, now()) NOT NULL,
     view_workflows boolean DEFAULT true NOT NULL,
-    view_emails boolean DEFAULT true NOT NULL
+    view_emails boolean DEFAULT true NOT NULL,
+     view_products boolean DEFAULT true NOT NULL,
+    manage_products boolean DEFAULT false NOT NULL
 );
 
 
