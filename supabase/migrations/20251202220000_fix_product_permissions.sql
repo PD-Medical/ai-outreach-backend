@@ -25,9 +25,8 @@ ALTER TABLE public.user_permissions
     ADD COLUMN IF NOT EXISTS manage_products BOOLEAN;
 
 -- 3. Update get_user_effective_permissions to include product permissions
+-- Replace existing get_user_effective_permissions with product-aware version
 DROP FUNCTION IF EXISTS public.get_user_effective_permissions(uuid);
-
--- File: 20251202220000_fix_product_permissions.sql
 
 CREATE FUNCTION public.get_user_effective_permissions(target_user_id uuid)
 RETURNS TABLE(
@@ -54,14 +53,57 @@ DECLARE
     user_overrides RECORD;
 BEGIN
     PERFORM set_config('search_path', 'public,pg_temp', true);
-    ...
+    
+    -- Check caller has permission or is viewing their own
+    IF NOT (
+        public.has_permission('manage_users')
+        OR auth.uid() = target_user_id
+    ) THEN
+        RAISE EXCEPTION 'Unauthorized';
+    END IF;
+    
+    -- Get user's role
+    SELECT p.role INTO user_role
+    FROM public.profiles p
+    WHERE p.auth_user_id = target_user_id
+    LIMIT 1;
+    
+    -- If user doesn't exist, return all false
+    IF user_role IS NULL THEN
+        RETURN QUERY SELECT
+            false, false, false, false, false,
+            false, false, false, false, false,
+            false, false, false, false;
+        RETURN;
+    END IF;
+    
+    -- Get role permissions
+    SELECT * INTO role_perms
+    FROM public.role_permissions rp
+    WHERE rp.role = user_role
+    LIMIT 1;
+    
+    -- Get user overrides (if any)
+    SELECT * INTO user_overrides
+    FROM public.user_permissions up
+    WHERE up.auth_user_id = target_user_id
+    LIMIT 1;
+    
+    -- Return merged permissions (role defaults + overrides)
     RETURN QUERY SELECT
-        COALESCE(user_overrides.view_users, role_perms.view_users),
-        ...
-        COALESCE(user_overrides.view_workflows, role_perms.view_workflows),
-        COALESCE(user_overrides.view_emails, role_perms.view_emails),
-        COALESCE(user_overrides.view_products, role_perms.view_products),
-        COALESCE(user_overrides.manage_products, role_perms.manage_products),
+        COALESCE(user_overrides.view_users,        role_perms.view_users),
+        COALESCE(user_overrides.manage_users,      role_perms.manage_users),
+        COALESCE(user_overrides.view_contacts,     role_perms.view_contacts),
+        COALESCE(user_overrides.manage_contacts,   role_perms.manage_contacts),
+        COALESCE(user_overrides.view_campaigns,    role_perms.view_campaigns),
+        COALESCE(user_overrides.manage_campaigns,  role_perms.manage_campaigns),
+        COALESCE(user_overrides.approve_campaigns, role_perms.approve_campaigns),
+        COALESCE(user_overrides.view_analytics,    role_perms.view_analytics),
+        COALESCE(user_overrides.manage_approvals,  role_perms.manage_approvals),
+        COALESCE(user_overrides.view_workflows,    role_perms.view_workflows),
+        COALESCE(user_overrides.view_emails,       role_perms.view_emails),
+        COALESCE(user_overrides.view_products,     role_perms.view_products),
+        COALESCE(user_overrides.manage_products,   role_perms.manage_products),
         (user_overrides.id IS NOT NULL);
 END;
 $$;
