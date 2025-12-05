@@ -185,10 +185,16 @@ serve(async (req) => {
       created_by_user_id: user.id,
     };
 
-    // Invoke email-agent Lambda
-    const lambdaUrl = Deno.env.get("EMAIL_AGENT_LAMBDA_URL");
-    if (!lambdaUrl) {
-      console.error("EMAIL_AGENT_LAMBDA_URL not configured");
+    // Invoke email-agent Lambda - get URL from system_config
+    const { data: configData, error: configError } = await supabase
+      .from('system_config')
+      .select('value')
+      .eq('key', 'email_agent_url')
+      .single();
+
+    const lambdaUrl = configData?.value;
+    if (configError || !lambdaUrl) {
+      console.error("email_agent_url not found in system_config:", configError);
       return new Response(
         JSON.stringify({ error: "Email agent service not configured" }),
         { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } }

@@ -10,11 +10,6 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.0";
 
-// Lambda Function URL (set via environment variable)
-// For local dev, use host.docker.internal to reach host machine from Docker
-const LAMBDA_FUNCTION_URL = Deno.env.get("GET_TOOL_SCHEMAS_LAMBDA_URL") ||
-  "http://host.docker.internal:3001/get-tool-schemas";
-
 serve(async (req) => {
   // Handle CORS preflight
   if (req.method === "OPTIONS") {
@@ -42,14 +37,28 @@ serve(async (req) => {
   }
 
   try {
-    if (!LAMBDA_FUNCTION_URL) {
-      throw new Error("GET_TOOL_SCHEMAS_LAMBDA_URL environment variable not set");
+    const supabase = createClient(
+      Deno.env.get("SUPABASE_URL") ?? "",
+      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? ""
+    );
+
+    // Get Lambda URL from system_config
+    const { data: configData, error: configError } = await supabase
+      .from('system_config')
+      .select('value')
+      .eq('key', 'get_tool_schemas_url')
+      .single();
+
+    const lambdaFunctionUrl = configData?.value;
+    if (configError || !lambdaFunctionUrl) {
+      console.error("get_tool_schemas_url not found in system_config:", configError);
+      throw new Error("Get tool schemas service not configured");
     }
 
     console.log("[GetTools] Fetching tool schemas from Lambda...");
 
     // Call Lambda function
-    const lambdaResponse = await fetch(LAMBDA_FUNCTION_URL, {
+    const lambdaResponse = await fetch(lambdaFunctionUrl, {
       method: "GET",
       headers: {
         "Content-Type": "application/json",
