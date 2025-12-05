@@ -42,6 +42,8 @@ const validColumns = [
   "approve_campaigns",
   "view_analytics",
   "manage_approvals",
+  "view_products",  
+  "manage_products",
 ]
 
 function isValidColumn(column: string): boolean {

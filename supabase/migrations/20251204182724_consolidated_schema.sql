@@ -13,9 +13,6 @@
 -- PostgreSQL database dump
 --
 
-\restrict 1GKsagdZzdzFdDlSHmXeUa31FoKKTuwVjoWk31bGYul4VwcyK9ZvF8j9tDQdhdE
-
-
 SET statement_timeout = 0;
 SET lock_timeout = 0;
 SET idle_in_transaction_session_timeout = 0;
@@ -32,7 +29,7 @@ SET row_security = off;
 -- Name: public; Type: SCHEMA; Schema: -; Owner: -
 --
 
-CREATE SCHEMA public;
+CREATE SCHEMA IF NOT EXISTS public;
 
 
 --
@@ -116,20 +113,32 @@ END;
 $$;
 
 
---
--- Name: admin_update_user_role(uuid, public.role_type); Type: FUNCTION; Schema: public; Owner: -
---
 
-CREATE FUNCTION public.admin_update_user_role(p_profile_id uuid, new_role public.role_type) RETURNS json
+
+-- Name: admin_update_user_role(uuid, public.role_type); Type: FUNCTION; Schema: public; Owner: -
+
+CREATE FUNCTION public.admin_update_user_role(profile_id uuid, new_role public.role_type) RETURNS json
     LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
     AS $$
 BEGIN
-    IF NOT has_permission('manage_users') THEN
+    PERFORM set_config('search_path', 'public,pg_temp', true);
+    
+    -- Check if admin
+    IF NOT public.has_permission('manage_users') THEN
         RETURN json_build_object('success', false, 'error', 'Unauthorized');
     END IF;
-    UPDATE profiles
+    
+    -- Update role
+    -- Note: profiles.profile_id is the column, admin_update_user_role.profile_id is the parameter
+    UPDATE public.profiles
     SET role = new_role, updated_at = NOW()
-    WHERE profile_id = p_profile_id;
+    WHERE profiles.profile_id = admin_update_user_role.profile_id;
+    
+    IF NOT FOUND THEN
+        RETURN json_build_object('success', false, 'error', 'Profile not found');
+    END IF;
+    
     RETURN json_build_object('success', true);
 END;
 $$;
@@ -1113,15 +1122,32 @@ $$;
 -- Name: prevent_role_change(); Type: FUNCTION; Schema: public; Owner: -
 --
 
+-- Name: prevent_role_change(); Type: FUNCTION; Schema: public; Owner: -
+
 CREATE FUNCTION public.prevent_role_change() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
-begin
-  if current_user <> 'service_role' and new.role <> old.role then
-    raise exception 'Role changes require service role privileges';
-  end if;
-  return new;
-end;
+BEGIN
+    -- Allow role changes if:
+    -- 1. Current user is service_role (can change any role), OR
+    -- 2. User has manage_users permission AND is changing someone else's role (not their own)
+    IF current_user <> 'service_role' 
+       AND new.role <> old.role THEN
+        
+        -- Check if user has admin permission
+        IF NOT public.has_permission('manage_users') THEN
+            RAISE EXCEPTION 'Role changes require service role privileges';
+        END IF;
+        
+        -- Block admins from changing their own role
+        IF OLD.auth_user_id = auth.uid() THEN
+            RAISE EXCEPTION 'Admins cannot change their own role';
+        END IF;
+        
+    END IF;
+    
+    RETURN NEW;
+END;
 $$;
 
 
@@ -2261,7 +2287,9 @@ CREATE TABLE public.role_permissions (
     manage_approvals boolean DEFAULT false NOT NULL,
     updated_at timestamp with time zone DEFAULT timezone('utc'::text, now()) NOT NULL,
     view_workflows boolean DEFAULT true NOT NULL,
-    view_emails boolean DEFAULT true NOT NULL
+    view_emails boolean DEFAULT true NOT NULL,
+     view_products boolean DEFAULT true NOT NULL,
+    manage_products boolean DEFAULT false NOT NULL
 );
 
 
@@ -4828,6 +4856,4 @@ ALTER TABLE public.workflows ENABLE ROW LEVEL SECURITY;
 --
 -- PostgreSQL database dump complete
 --
-
-\unrestrict 1GKsagdZzdzFdDlSHmXeUa31FoKKTuwVjoWk31bGYul4VwcyK9ZvF8j9tDQdhdE
 
