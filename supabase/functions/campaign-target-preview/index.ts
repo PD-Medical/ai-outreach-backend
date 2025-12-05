@@ -15,9 +15,7 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders, handleCors } from "../_shared/cors.ts";
 
-// Lambda Function URL for natural language SQL generation
-const CAMPAIGN_SQL_AGENT_URL = Deno.env.get("CAMPAIGN_SQL_AGENT_LAMBDA_URL") ||
-  "http://host.docker.internal:3001/campaign-sql-agent";
+// Lambda Function URL will be fetched from system_config at runtime
 
 // Types
 interface FilterConfig {
@@ -165,13 +163,26 @@ serve(async (req) => {
       sql = buildSqlFromFilters(filterConfig!, exclusionConfig);
       console.log(`[CampaignTargetPreview] Generated SQL from form: ${sql.substring(0, 200)}...`);
     } else {
+      // Get Lambda URL from system_config
+      const { data: configData, error: configError } = await supabase
+        .from('system_config')
+        .select('value')
+        .eq('key', 'campaign_sql_agent_url')
+        .single();
+
+      const campaignSqlAgentUrl = configData?.value;
+      if (configError || !campaignSqlAgentUrl) {
+        console.error("campaign_sql_agent_url not found in system_config:", configError);
+        throw new Error("Campaign SQL agent service not configured");
+      }
+
       // Call Lambda for natural language SQL generation with clarification support
       console.log(`[CampaignTargetPreview] Calling SQL agent for: ${naturalLanguageQuery}`);
       if (clarificationResponses?.length) {
         console.log(`[CampaignTargetPreview] With ${clarificationResponses.length} clarification responses`);
       }
 
-      const lambdaResponse = await fetch(CAMPAIGN_SQL_AGENT_URL, {
+      const lambdaResponse = await fetch(campaignSqlAgentUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

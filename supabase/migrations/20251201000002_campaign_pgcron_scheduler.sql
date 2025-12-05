@@ -26,7 +26,7 @@ GRANT USAGE ON SCHEMA cron TO postgres;
 SELECT cron.schedule(
   'campaign-scheduler-conditional',
   '*/5 * * * *',
-  $outer$
+  $cron_body$
   DO $inner$
   DECLARE
     v_url text;
@@ -64,7 +64,7 @@ SELECT cron.schedule(
       END IF;
     END IF;
   END $inner$;
-  $outer$
+  $cron_body$
 );
 
 -- ============================================================================
@@ -77,8 +77,8 @@ SELECT cron.schedule(
 SELECT cron.schedule(
   'campaign-executor-conditional',
   '*/5 * * * *',
-  $outer$
-  DO $inner$
+  $cron_body2$
+  DO $inner2$
   DECLARE
     v_url text;
     v_has_work boolean;
@@ -115,8 +115,8 @@ SELECT cron.schedule(
         RAISE WARNING 'campaign_executor_url not configured in system_config';
       END IF;
     END IF;
-  END $inner$;
-  $outer$
+  END $inner2$;
+  $cron_body2$
 );
 
 -- ============================================================================

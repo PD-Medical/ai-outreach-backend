@@ -127,7 +127,17 @@ serve(async (req) => {
     // For redraft, invoke Lambda with simplified payload
     // Lambda will load all context from the draft's stored columns
     if (decision === 'redraft') {
-      const lambdaUrl = Deno.env.get("EMAIL_AGENT_LAMBDA_URL");
+      // Get Lambda URL from system_config
+      const { data: configData, error: configError } = await supabase
+        .from('system_config')
+        .select('value')
+        .eq('key', 'email_agent_url')
+        .single();
+
+      const lambdaUrl = configData?.value;
+      if (configError) {
+        console.error("email_agent_url not found in system_config:", configError);
+      }
       if (lambdaUrl) {
         // Simplified redraft payload - Lambda loads context from DB
         const lambdaPayload = {
@@ -173,11 +183,11 @@ serve(async (req) => {
           );
         }
       } else {
-        console.warn("EMAIL_AGENT_LAMBDA_URL not configured. Cannot invoke redraft.");
+        console.warn("email_agent_url not configured in system_config. Cannot invoke redraft.");
         return new Response(
           JSON.stringify({
             status: 'partial_success',
-            message: 'Draft marked for redraft. Lambda URL not configured - manual redraft may be needed.',
+            message: 'Draft marked for redraft. Lambda URL not configured in system_config - manual redraft may be needed.',
             draft_id,
             decision,
           }),
