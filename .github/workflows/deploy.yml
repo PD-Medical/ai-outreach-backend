@@ -30,7 +30,7 @@ on:
         type: boolean
 
 env:
-  SUPABASE_CLI_VERSION: '2.0.0'
+  SUPABASE_CLI_VERSION: 'latest'
 
 jobs:
   deploy:
