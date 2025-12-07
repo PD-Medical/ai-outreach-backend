@@ -49,6 +49,16 @@ jobs:
         with:
           version: ${{ env.SUPABASE_CLI_VERSION }}
 
+      - name: Set project ID in config
+        run: |
+          # Add project_id to config.toml if not present
+          if ! grep -q "^project_id" supabase/config.toml; then
+            sed -i '1a project_id = "${{ vars.SUPABASE_PROJECT_ID }}"' supabase/config.toml
+          else
+            sed -i 's/^project_id = .*/project_id = "${{ vars.SUPABASE_PROJECT_ID }}"/' supabase/config.toml
+          fi
+          cat supabase/config.toml | head -5
+
       - name: Link Supabase project
         run: |
           supabase link --project-ref ${{ vars.SUPABASE_PROJECT_ID }}
