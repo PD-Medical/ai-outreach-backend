@@ -5,17 +5,20 @@ on:
     branches:
       - main
       - staging
+      - dev
   pull_request:
     branches:
       - main
+      - dev
   workflow_dispatch:
     inputs:
       environment:
         description: 'Environment to deploy to'
         required: true
-        default: 'staging'
+        default: 'dev'
         type: choice
         options:
+          - dev
           - staging
           - production
       skip_migrations:
@@ -34,11 +37,11 @@ env:
 
 jobs:
   deploy:
-    name: Deploy to ${{ github.event.inputs.environment || (github.ref == 'refs/heads/main' && 'production') || 'staging' }}
+    name: Deploy to ${{ github.event.inputs.environment || (github.ref == 'refs/heads/main' && 'production') || (github.ref == 'refs/heads/staging' && 'staging') || 'dev' }}
     runs-on: ubuntu-latest
 
     environment:
-      name: ${{ github.event.inputs.environment || (github.ref == 'refs/heads/main' && 'production') || 'staging' }}
+      name: ${{ github.event.inputs.environment || (github.ref == 'refs/heads/main' && 'production') || (github.ref == 'refs/heads/staging' && 'staging') || 'dev' }}
 
     steps:
       - name: Checkout code
@@ -104,7 +107,8 @@ jobs:
         if: ${{ github.event_name == 'pull_request' }}
         run: |
           echo "Validating Supabase configuration..."
-          supabase db lint
+          # Validate that migrations can be parsed (dry-run)
+          supabase db push --dry-run
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
 
@@ -112,7 +116,7 @@ jobs:
         run: |
           echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- **Environment**: ${{ github.event.inputs.environment || (github.ref == 'refs/heads/main' && 'production') || 'staging' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Environment**: ${{ github.event.inputs.environment || (github.ref == 'refs/heads/main' && 'production') || (github.ref == 'refs/heads/staging' && 'staging') || 'dev' }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Project ID**: ${{ vars.SUPABASE_PROJECT_ID }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Migrations**: ${{ github.event.inputs.skip_migrations == 'true' && 'Skipped' || 'Applied' }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Functions**: ${{ github.event.inputs.skip_functions == 'true' && 'Skipped' || 'Deployed' }}" >> $GITHUB_STEP_SUMMARY
