@@ -1,7 +1,64 @@
--- Seed data for products and product_documents only
+-- Seed data for essential reference data and products
 -- Generated for staging/production environments
 
 SET session_replication_role = replica;
+
+-- ============================================================================
+-- ROLE PERMISSIONS SEED DATA
+-- Critical for RLS policies to work correctly
+-- ============================================================================
+
+-- Seed role_permissions with default values for all roles
+INSERT INTO public.role_permissions (
+    role,
+    view_users,
+    manage_users,
+    view_contacts,
+    manage_contacts,
+    view_campaigns,
+    manage_campaigns,
+    approve_campaigns,
+    view_analytics,
+    manage_approvals,
+    view_workflows,
+    view_emails,
+    view_products,
+    manage_products
+) VALUES
+    ('admin', true, true, true, true, true, true, true, true, true, true, true, true, true),
+    ('sales', true, false, false, false, true, false, false, false, false, true, true, true, true),
+    ('accounts', true, false, true, true, true, false, true, true, true, true, true, true, false),
+    ('management', false, false, true, false, true, false, true, true, true, true, true, true, false)
+ON CONFLICT (role) DO UPDATE SET
+    view_users = EXCLUDED.view_users,
+    manage_users = EXCLUDED.manage_users,
+    view_contacts = EXCLUDED.view_contacts,
+    manage_contacts = EXCLUDED.manage_contacts,
+    view_campaigns = EXCLUDED.view_campaigns,
+    manage_campaigns = EXCLUDED.manage_campaigns,
+    approve_campaigns = EXCLUDED.approve_campaigns,
+    view_analytics = EXCLUDED.view_analytics,
+    manage_approvals = EXCLUDED.manage_approvals,
+    view_workflows = EXCLUDED.view_workflows,
+    view_emails = EXCLUDED.view_emails,
+    view_products = EXCLUDED.view_products,
+    manage_products = EXCLUDED.manage_products;
+
+-- ============================================================================
+-- SYSTEM CONFIG SEED DATA
+-- Required configuration entries for the application
+-- ============================================================================
+
+INSERT INTO public.system_config (key, value, description) VALUES
+    ('valid_email_categories', '{"spam": ["spam-marketing", "spam-phishing", "spam-automated", "spam-other"], "other": ["other-notification", "other-unknown"], "business": ["business-critical", "business-new_lead", "business-existing_customer", "business-new_order", "business-support", "business-transactional"], "personal": ["personal-friend", "personal-social", "personal-other"]}', 'Complete list of valid two-level email categories'),
+    ('valid_email_intents', '{"intents": ["inquiry", "order", "quote_request", "complaint", "follow_up", "meeting_request", "feedback", "support_request", "other"]}', 'Valid email intent values (for business emails)'),
+    ('valid_email_sentiments', '{"sentiments": ["positive", "neutral", "negative", "urgent"]}', 'Valid email sentiment values (for business emails)'),
+    ('workflow_category_rules', '{"notes": "Default category matching rules for workflows. Can be overridden per workflow.", "enabled_categories": ["business-critical", "business-new_lead", "business-existing_customer", "business-new_order", "business-support"], "disabled_categories": ["business-transactional", "spam-*", "personal-*"]}', 'Global default for workflow category matching rules')
+ON CONFLICT (key) DO NOTHING;
+
+-- ============================================================================
+-- PRODUCTS SEED DATA
+-- ============================================================================
 
 -- Data for Name: products; Type: TABLE DATA; Schema: public; Owner: postgres
 --

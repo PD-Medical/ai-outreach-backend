@@ -53,7 +53,7 @@ serve(async (req) => {
     const { data: drafts, error: selectError } = await supabaseAdmin
       .from("email_drafts")
       .select(
-        "id, subject, body_html, body_plain, to_emails, thread_id, conversation_id, from_mailbox_id, sent_email_id, sent_at"
+        "id, subject, body_html, body_plain, to_emails, cc_emails, bcc_emails, thread_id, conversation_id, from_mailbox_id, sent_email_id, sent_at"
       )
       .in("approval_status", ["approved", "auto_approved"])
       .is("sent_email_id", null)
@@ -137,6 +137,8 @@ serve(async (req) => {
         const emailPayload: {
           from: string;
           to: string[];
+          cc?: string[];
+          bcc?: string[];
           subject: string;
           html: string;
           attachments?: typeof attachments;
@@ -146,6 +148,16 @@ serve(async (req) => {
           subject: draft.subject,
           html: fullHtml,
         };
+
+        // Include CC if specified
+        if (draft.cc_emails && draft.cc_emails.length > 0) {
+          emailPayload.cc = draft.cc_emails;
+        }
+
+        // Include BCC if specified
+        if (draft.bcc_emails && draft.bcc_emails.length > 0) {
+          emailPayload.bcc = draft.bcc_emails;
+        }
 
         // Only include attachments if we have any
         if (attachments.length > 0) {
@@ -165,6 +177,8 @@ serve(async (req) => {
             conversation_id: draft.conversation_id,
             from_email: FROM_EMAIL,
             to_emails: draft.to_emails,
+            cc_emails: draft.cc_emails || [],
+            bcc_emails: draft.bcc_emails || [],
             subject: draft.subject,
             body_html: fullHtml, // Store with signature
             body_plain: draft.body_plain,
