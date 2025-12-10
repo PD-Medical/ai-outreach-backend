@@ -9,8 +9,8 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
 const RESEND_API_KEY = Deno.env.get("RESEND_API_KEY") ?? "";
 
-// Fixed from-email as requested
-const FROM_EMAIL = "peter@pdmedical.com.au";
+// Default fallback from email if mailbox not found
+const DEFAULT_FROM_EMAIL = "noreply@pdmedical.com.au";
 
 if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
   throw new Error("Missing Supabase environment variables");
@@ -53,7 +53,7 @@ serve(async (req) => {
     const { data: drafts, error: selectError } = await supabaseAdmin
       .from("email_drafts")
       .select(
-        "id, subject, body_html, body_plain, to_emails, cc_emails, bcc_emails, thread_id, conversation_id, from_mailbox_id, sent_email_id, sent_at"
+        "id, subject, body_html, body_plain, to_emails, cc_emails, bcc_emails, thread_id, conversation_id, from_mailbox_id, sent_email_id, sent_at, contact_id, workflow_execution_id, campaign_enrollment_id, source_email_id"
       )
       .in("approval_status", ["approved", "auto_approved"])
       .is("sent_email_id", null)
@@ -78,26 +78,50 @@ serve(async (req) => {
 
     for (const draft of drafts) {
       try {
-        // 2) Fetch mailbox signature and signature_images
+        // 2) Fetch mailbox email, signature and signature_images
+        let mailboxEmail = DEFAULT_FROM_EMAIL;
         let signatureHtml = "";
         let signatureImages: SignatureImage[] = [];
 
         if (draft.from_mailbox_id) {
           const { data: mailbox, error: mailboxError } = await supabaseAdmin
             .from("mailboxes")
-            .select("signature_html, signature_images")
+            .select("email, signature_html, signature_images")
             .eq("id", draft.from_mailbox_id)
             .single();
 
           if (mailboxError) {
-            console.warn("Failed to fetch mailbox signature:", mailboxError);
+            console.warn("Failed to fetch mailbox:", mailboxError);
           } else if (mailbox) {
+            mailboxEmail = mailbox.email || DEFAULT_FROM_EMAIL;
             signatureHtml = mailbox.signature_html || "";
             signatureImages = (mailbox.signature_images as SignatureImage[]) || [];
           }
         }
 
-        // 3) Build attachments array for CID-embedded signature images
+        // 3) Build threading headers if this is a reply
+        let inReplyTo: string | null = null;
+        let emailReferences: string | null = null;
+
+        if (draft.source_email_id) {
+          const { data: sourceEmail, error: sourceError } = await supabaseAdmin
+            .from("emails")
+            .select("message_id, email_references")
+            .eq("id", draft.source_email_id)
+            .single();
+
+          if (sourceEmail && !sourceError) {
+            inReplyTo = sourceEmail.message_id;
+            // Build References: previous references + source message_id
+            if (sourceEmail.email_references) {
+              emailReferences = `${sourceEmail.email_references} ${sourceEmail.message_id}`;
+            } else {
+              emailReferences = sourceEmail.message_id;
+            }
+          }
+        }
+
+        // 4) Build attachments array for CID-embedded signature images
         const attachments: Array<{
           filename: string;
           content: string;
@@ -129,11 +153,25 @@ serve(async (req) => {
           }
         }
 
-        // 4) Combine body with signature
+        // 5) Combine body with signature
         const bodyHtml = draft.body_html ?? draft.body_plain ?? "";
         const fullHtml = signatureHtml ? `${bodyHtml}<br/><br/>${signatureHtml}` : bodyHtml;
 
-        // 5) Send email via Resend with CID attachments
+        // 6) Build Resend tags for tracking (used by resend-webhook)
+        const tags: Array<{ name: string; value: string }> = [
+          { name: "draft_id", value: draft.id },
+        ];
+        if (draft.contact_id) {
+          tags.push({ name: "contact_id", value: draft.contact_id });
+        }
+        if (draft.workflow_execution_id) {
+          tags.push({ name: "workflow_execution_id", value: draft.workflow_execution_id });
+        }
+        if (draft.campaign_enrollment_id) {
+          tags.push({ name: "campaign_enrollment_id", value: draft.campaign_enrollment_id });
+        }
+
+        // 7) Build email payload for Resend
         const emailPayload: {
           from: string;
           to: string[];
@@ -142,11 +180,14 @@ serve(async (req) => {
           subject: string;
           html: string;
           attachments?: typeof attachments;
+          tags?: typeof tags;
+          headers?: Record<string, string>;
         } = {
-          from: FROM_EMAIL,
+          from: mailboxEmail,
           to: draft.to_emails,
           subject: draft.subject,
           html: fullHtml,
+          tags,
         };
 
         // Include CC if specified
@@ -164,26 +205,48 @@ serve(async (req) => {
           emailPayload.attachments = attachments;
         }
 
-        await resend.emails.send(emailPayload);
+        // Add threading headers for replies
+        if (inReplyTo) {
+          emailPayload.headers = {
+            'In-Reply-To': `<${inReplyTo}>`,
+          };
+          if (emailReferences) {
+            // Format each reference with angle brackets
+            const formattedRefs = emailReferences
+              .split(' ')
+              .filter(id => id.trim())
+              .map(id => id.startsWith('<') ? id : `<${id}>`)
+              .join(' ');
+            emailPayload.headers['References'] = formattedRefs;
+          }
+        }
+
+        // 8) Send email via Resend
+        const resendResponse = await resend.emails.send(emailPayload);
+        const resendMessageId = resendResponse.data?.id || crypto.randomUUID();
 
         const nowIso = new Date().toISOString();
 
-        // 6) Insert record into emails table
+        // 9) Insert record into emails table
         const { data: emailRow, error: emailError } = await supabaseAdmin
           .from("emails")
           .insert({
-            message_id: crypto.randomUUID(),
-            thread_id: draft.thread_id,
+            message_id: resendMessageId,
+            thread_id: draft.thread_id || crypto.randomUUID(),
             conversation_id: draft.conversation_id,
-            from_email: FROM_EMAIL,
+            in_reply_to: inReplyTo,
+            email_references: emailReferences,
+            from_email: mailboxEmail,
             to_emails: draft.to_emails,
             cc_emails: draft.cc_emails || [],
             bcc_emails: draft.bcc_emails || [],
             subject: draft.subject,
-            body_html: fullHtml, // Store with signature
+            body_html: fullHtml,
             body_plain: draft.body_plain,
             mailbox_id: draft.from_mailbox_id,
+            contact_id: draft.contact_id,
             direction: "outgoing",
+            imap_folder: "Sent",
             sent_at: nowIso,
             received_at: nowIso,
           })
@@ -195,7 +258,7 @@ serve(async (req) => {
           continue;
         }
 
-        // 7) Mark draft as sent and link to emails row
+        // 10) Mark draft as sent and link to emails row
         const { error: updateError } = await supabaseAdmin
           .from("email_drafts")
           .update({
@@ -210,6 +273,7 @@ serve(async (req) => {
           continue;
         }
 
+        console.log(`Sent email for draft ${draft.id} via ${mailboxEmail}, Resend ID: ${resendMessageId}`);
         processed += 1;
       } catch (err) {
         console.error("Error sending draft", draft.id, err);
@@ -228,4 +292,3 @@ serve(async (req) => {
     });
   }
 });
-
