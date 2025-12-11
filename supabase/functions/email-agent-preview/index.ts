@@ -98,7 +98,7 @@ serve(async (req) => {
     // Verify mailbox exists and is active
     const { data: mailbox, error: mailboxError } = await supabase
       .from('mailboxes')
-      .select('id, email, name, persona_description, signature, is_active')
+      .select('id, email, name, persona_description, signature_html, is_active')
       .eq('id', from_mailbox_id)
       .single();
 
@@ -160,7 +160,7 @@ serve(async (req) => {
         to: recipientEmail,
         // Include mailbox context for persona/signature
         mailbox_persona: mailbox.persona_description,
-        mailbox_signature: mailbox.signature,
+        mailbox_signature: mailbox.signature_html,
       },
       // Include pre-fetched context to reduce Lambda lookups
       email_context: emailContext ? {

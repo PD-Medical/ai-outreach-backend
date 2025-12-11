@@ -1,9 +1,11 @@
 /**
  * Email Template Generate Edge Function
  *
- * Generates an email TEMPLATE with merge fields using AI.
- * Used by campaign builder to create a single template that gets
- * personalized for each contact via field substitution.
+ * Generates an email TEMPLATE with merge fields using the email-agent Lambda.
+ * Uses the full agent capabilities including:
+ * - Product search and info tools
+ * - Contact/organization field analysis
+ * - Intelligent merge field selection based on data population
  *
  * Request body:
  * {
@@ -11,6 +13,7 @@
  *   productIds?: string[],      // Products to include context for
  *   fromMailboxId: string,      // Mailbox for sender persona
  *   sampleContactId?: string,   // Optional sample contact for preview
+ *   contactIds?: string[],      // Target contacts for field analysis
  *   campaignId?: string,        // Optional campaign to save template to
  *   feedback?: string,          // Regeneration feedback
  * }
@@ -22,6 +25,7 @@
  *     subject: string,          // Template with merge fields
  *     body: string,             // Template with merge fields
  *     mergeFieldsUsed: string[],// Which fields AI used
+ *     reasoning?: string,       // AI's reasoning for choices
  *     samplePreview?: {         // Rendered with sample contact
  *       subject: string,
  *       body: string,
@@ -63,6 +67,7 @@ interface TemplateRequest {
   productIds?: string[];
   fromMailboxId: string;
   sampleContactId?: string;
+  contactIds?: string[];
   campaignId?: string;
   feedback?: string;
 }
@@ -81,7 +86,7 @@ serve(async (req) => {
 
     // Parse request
     const body: TemplateRequest = await req.json();
-    const { emailPurpose, productIds, fromMailboxId, sampleContactId, campaignId, feedback } = body;
+    const { emailPurpose, productIds, fromMailboxId, sampleContactId, contactIds, campaignId, feedback } = body;
 
     // Validate required fields
     if (!emailPurpose || !fromMailboxId) {
@@ -94,7 +99,7 @@ serve(async (req) => {
       );
     }
 
-    // Fetch mailbox for sender persona
+    // Fetch mailbox for sender persona (for signature append and preview info)
     const { data: mailbox, error: mailboxError } = await supabase
       .from('mailboxes')
       .select('id, email, name, persona_description, signature_html')
@@ -136,143 +141,78 @@ serve(async (req) => {
       sampleContact = contact;
     }
 
-    // Fetch product info if provided
-    let productContext = "";
-    if (productIds && productIds.length > 0) {
-      const { data: products } = await supabase
-        .from('products')
-        .select('id, product_name, product_code, main_category, subcategory, market_potential, sales_instructions')
-        .in('id', productIds);
+    // Get email-agent Lambda URL from system_config
+    const { data: configData, error: configError } = await supabase
+      .from('system_config')
+      .select('value')
+      .eq('key', 'email_agent_url')
+      .single();
 
-      if (products && products.length > 0) {
-        productContext = "\n\nPRODUCT INFORMATION TO INCLUDE:\n" +
-          products.map(p =>
-            `- ${p.product_name} (${p.product_code})\n  Category: ${p.main_category} > ${p.subcategory}\n  Market Info: ${p.market_potential || 'General medical equipment'}\n  Sales Notes: ${p.sales_instructions || 'None'}`
-          ).join("\n\n");
-      }
-    }
-
-    // Build the prompt for AI to generate a TEMPLATE with merge fields
-    const mergeFieldsList = SUPPORTED_MERGE_FIELDS
-      .map(f => `- {${f.field}} - ${f.description} (e.g., "${f.example}")`)
-      .join('\n');
-
-    const prompt = `You are creating an email TEMPLATE for a sales campaign at PD Medical, a medical equipment supplier.
-
-This template will be used to send emails to MULTIPLE contacts, so you MUST use merge fields (placeholders) that will be replaced with each contact's actual data.
-
-AVAILABLE MERGE FIELDS (use single curly braces):
-${mergeFieldsList}
-
-SENDER INFORMATION:
-- Name: ${mailbox.name || 'Sales Team'}
-- Email: ${mailbox.email}
-${mailbox.persona_description ? `- Persona: ${mailbox.persona_description}` : ''}
-
-EMAIL PURPOSE (from user):
-${emailPurpose}
-${productContext}
-${feedback ? `\nFEEDBACK FOR IMPROVEMENT:\n${feedback}` : ''}
-
-TEMPLATE INSTRUCTIONS:
-1. Use merge fields like {first_name}, {company}, etc. for personalization
-2. At minimum, use {first_name} in the greeting (e.g., "Hi {first_name},")
-3. Reference {company} or {organization_name} where appropriate for context
-4. Keep it concise but compelling (150-300 words ideal)
-5. Include a clear call-to-action
-6. Use Australian English spelling
-7. Do NOT use generic phrases like "I hope this email finds you well"
-8. Make it specific to medical/healthcare industry
-9. The template should work for ANY contact when fields are substituted
-
-EXAMPLE of proper merge field usage:
-"Hi {first_name},
-
-I noticed {company} is focused on infection control, and wanted to reach out about our latest solutions.
-
-As {job_title} at {company}, you understand the importance of..."
-
-IMPORTANT: Return ONLY valid JSON in this exact format:
-{
-  "subject": "Subject line with optional {merge_fields}",
-  "body": "Email body with {merge_fields} for personalization. Use \\n for line breaks."
-}`;
-
-    // Call OpenRouter API
-    const openRouterKey = Deno.env.get("OPENROUTER_API_KEY");
-    if (!openRouterKey) {
+    const lambdaUrl = configData?.value;
+    if (configError || !lambdaUrl) {
+      console.error("email_agent_url not found in system_config:", configError);
       return new Response(
-        JSON.stringify({ success: false, error: "AI service not configured" }),
+        JSON.stringify({ success: false, error: "Email agent service not configured" }),
         { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
-    const model = Deno.env.get("DEFAULT_LLM_MODEL") || "x-ai/grok-4-fast";
+    console.log(`Invoking email-agent Lambda (template mode): ${lambdaUrl}`);
 
-    const aiResponse = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${openRouterKey}`,
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://pdmedical.com.au",
-        "X-Title": "PD Medical Template Generator"
+    // Build Lambda payload for template action
+    const lambdaPayload = {
+      action: 'template',
+      contact_ids: contactIds || [],  // For analyze_audience_fields_tool
+      product_ids: productIds || [],
+      params: {
+        email_purpose: emailPurpose,
+        feedback: feedback,
+        // Include mailbox persona for context
+        mailbox_name: mailbox.name,
+        mailbox_email: mailbox.email,
+        mailbox_persona: mailbox.persona_description,
       },
-      body: JSON.stringify({
-        model,
-        messages: [
-          { role: "user", content: prompt }
-        ],
-        max_tokens: 1000,
-        temperature: 0.7,
-      })
+    };
+
+    // Invoke Lambda
+    const lambdaResponse = await fetch(lambdaUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(lambdaPayload),
     });
 
-    if (!aiResponse.ok) {
-      const errorText = await aiResponse.text();
-      console.error("OpenRouter API error:", errorText);
+    const lambdaResult = await lambdaResponse.json();
+    console.log('Lambda response status:', lambdaResponse.status);
+
+    if (!lambdaResponse.ok) {
+      console.error('Lambda error:', lambdaResult);
       return new Response(
-        JSON.stringify({ success: false, error: "AI generation failed" }),
+        JSON.stringify({ success: false, error: "Template generation failed", details: lambdaResult }),
         { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
-    const aiResult = await aiResponse.json();
-    const content = aiResult.choices?.[0]?.message?.content;
-
-    if (!content) {
-      return new Response(
-        JSON.stringify({ success: false, error: "No content generated" }),
-        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
-
-    // Parse the JSON response
-    let templateData;
-    try {
-      const jsonMatch = content.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        templateData = JSON.parse(jsonMatch[0]);
-      } else {
-        throw new Error("No JSON found in response");
+    // Parse Lambda result - it may be nested in body
+    let templateData = lambdaResult;
+    if (lambdaResult.body && typeof lambdaResult.body === 'string') {
+      try {
+        templateData = JSON.parse(lambdaResult.body);
+      } catch {
+        templateData = lambdaResult;
       }
-    } catch (parseError) {
-      console.error("Failed to parse AI response:", content);
-      return new Response(
-        JSON.stringify({ success: false, error: "Failed to parse AI response" }),
-        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
     }
 
-    // Extract which merge fields were used
-    const mergeFieldPattern = /\{(\w+)\}/g;
-    const usedFields = new Set<string>();
-    let match;
-    const fullTemplate = templateData.subject + " " + templateData.body;
-    while ((match = mergeFieldPattern.exec(fullTemplate)) !== null) {
-      const fieldName = match[1];
-      if (SUPPORTED_MERGE_FIELDS.some(f => f.field === fieldName)) {
-        usedFields.add(fieldName);
-      }
+    // Extract template content
+    const subject = templateData.subject || '';
+    let templateBody = templateData.body || '';
+    const mergeFieldsUsed = templateData.merge_fields_used || [];
+    const reasoning = templateData.reasoning;
+
+    if (!subject && !templateBody) {
+      return new Response(
+        JSON.stringify({ success: false, error: "No template content generated", raw: templateData }),
+        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
     }
 
     // Append signature if mailbox has one
@@ -285,7 +225,7 @@ IMPORTANT: Return ONLY valid JSON in this exact format:
         .replace(/&nbsp;/g, ' ')
         .replace(/&amp;/g, '&')
         .trim();
-      templateData.body += `\n\n${plainSignature}`;
+      templateBody += `\n\n${plainSignature}`;
     }
 
     // Generate sample preview if sample contact provided
@@ -315,8 +255,8 @@ IMPORTANT: Return ONLY valid JSON in this exact format:
       };
 
       samplePreview = {
-        subject: renderTemplate(templateData.subject),
-        body: renderTemplate(templateData.body),
+        subject: renderTemplate(subject),
+        body: renderTemplate(templateBody),
       };
     }
 
@@ -325,8 +265,8 @@ IMPORTANT: Return ONLY valid JSON in this exact format:
       await supabase
         .from('campaign_sequences')
         .update({
-          email_template_subject: templateData.subject,
-          email_template_body: templateData.body,
+          email_template_subject: subject,
+          email_template_body: templateBody,
           template_status: 'pending_approval',
           template_generated_at: new Date().toISOString(),
         })
@@ -337,9 +277,10 @@ IMPORTANT: Return ONLY valid JSON in this exact format:
       JSON.stringify({
         success: true,
         data: {
-          subject: templateData.subject,
-          body: templateData.body,
-          mergeFieldsUsed: Array.from(usedFields),
+          subject: subject,
+          body: templateBody,
+          mergeFieldsUsed: mergeFieldsUsed,
+          reasoning: reasoning,
           samplePreview,
         }
       }),
