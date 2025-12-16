@@ -786,15 +786,13 @@ END;
 $$;
 
 
+--
 -- Name: handle_email_drafts_approval(); Type: FUNCTION; Schema: public; Owner: -
 --
 
 CREATE FUNCTION public.handle_email_drafts_approval() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
-DECLARE
-  v_edge_function_url text;
-  v_service_role_key  text;
 BEGIN
   -- Only react when approval_status actually changes to an approved state
   IF TG_OP = 'UPDATE'
@@ -804,36 +802,6 @@ BEGIN
     -- Set approved_at if not already set
     IF NEW.approved_at IS NULL THEN
       NEW.approved_at := now();
-    END IF;
-
-    -- Get edge function URL from system_config
-    SELECT value#>>'{}'
-    INTO v_edge_function_url
-    FROM system_config
-    WHERE key = 'send_approved_drafts_url';
-
-    -- Get service role key from system_config
-    SELECT value#>>'{}'
-    INTO v_service_role_key
-    FROM system_config
-    WHERE key = 'send_approved_drafts_service_role_key';
-
-    -- Invoke edge function to send the email immediately
-    IF v_edge_function_url IS NOT NULL AND v_service_role_key IS NOT NULL THEN
-      PERFORM net.http_post(
-        url := v_edge_function_url,
-        headers := jsonb_build_object(
-          'Content-Type', 'application/json',
-          'Authorization', 'Bearer ' || v_service_role_key
-        ),
-        body := jsonb_build_object(
-          'draft_id', NEW.id,
-          'triggered_at', now()::text
-        ),
-        timeout_milliseconds := 30000
-      );
-    ELSE
-      RAISE WARNING 'send_approved_drafts_url or service role key not configured in system_config';
     END IF;
   END IF;
 
