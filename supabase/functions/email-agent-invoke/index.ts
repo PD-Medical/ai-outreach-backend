@@ -45,6 +45,7 @@ interface InvokeRequest {
     tone?: 'professional' | 'friendly' | 'formal' | 'concise';
     product_ids?: string[];
     template_id?: string;
+    to?: string; // Recipient email for new emails (when contact not in DB)
   };
   source: {
     type: 'manual' | 'workflow' | 'campaign';

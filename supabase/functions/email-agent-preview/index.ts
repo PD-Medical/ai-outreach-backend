@@ -49,6 +49,7 @@ interface PreviewRequest {
     email_purpose: string;
     tone?: 'professional' | 'friendly' | 'formal' | 'concise';
     product_ids?: string[];
+    to?: string; // Recipient email for new emails (when contact not in DB)
   };
 }
 
@@ -130,6 +131,12 @@ serve(async (req) => {
         .single();
       contactDetails = contact;
       recipientEmail = contact?.email;
+    }
+
+    // Use params.to if explicitly provided (for new emails to contacts not in DB)
+    if (!recipientEmail && params.to) {
+      recipientEmail = params.to;
+      console.log(`Using params.to for recipient: ${recipientEmail}`);
     }
 
     // Get source email if provided (for reply context)
