@@ -43,6 +43,44 @@ async function blobToBase64(blob: Blob): Promise<string> {
   return base64Encode(uint8Array);
 }
 
+// Helper to format quoted reply content (standard email convention)
+function formatQuotedReply(
+  originalBodyHtml: string,
+  originalBodyPlain: string,
+  originalFrom: string,
+  originalDate: string
+): { html: string; plain: string } {
+  // Format date nicely
+  const dateStr = new Date(originalDate).toLocaleString('en-AU', {
+    weekday: 'short',
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true
+  });
+
+  // HTML version with blockquote styling (similar to Gmail)
+  const htmlQuote = `
+<br/><br/>
+<div class="gmail_quote">
+  <div style="color: #666; font-size: 12px; margin-bottom: 8px;">
+    On ${dateStr}, ${originalFrom} wrote:
+  </div>
+  <blockquote style="margin: 0 0 0 0.8ex; border-left: 1px solid #ccc; padding-left: 1ex; color: #555;">
+    ${originalBodyHtml}
+  </blockquote>
+</div>`;
+
+  // Plain text version with > prefix
+  const plainContent = originalBodyPlain || originalBodyHtml.replace(/<[^>]*>/g, '');
+  const plainLines = plainContent.split('\n').map(line => `> ${line}`).join('\n');
+  const plainQuote = `\n\nOn ${dateStr}, ${originalFrom} wrote:\n${plainLines}`;
+
+  return { html: htmlQuote, plain: plainQuote };
+}
+
 serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
@@ -99,14 +137,15 @@ serve(async (req) => {
           }
         }
 
-        // 3) Build threading headers if this is a reply
+        // 3) Build threading headers and fetch source email for quoting if this is a reply
         let inReplyTo: string | null = null;
         let emailReferences: string | null = null;
+        let quotedContent: { html: string; plain: string } | null = null;
 
         if (draft.source_email_id) {
           const { data: sourceEmail, error: sourceError } = await supabaseAdmin
             .from("emails")
-            .select("message_id, email_references")
+            .select("message_id, email_references, body_html, body_plain, from_email, received_at")
             .eq("id", draft.source_email_id)
             .single();
 
@@ -117,6 +156,16 @@ serve(async (req) => {
               emailReferences = `${sourceEmail.email_references} ${sourceEmail.message_id}`;
             } else {
               emailReferences = sourceEmail.message_id;
+            }
+
+            // Format quoted content for reply (standard email convention)
+            if (sourceEmail.body_html || sourceEmail.body_plain) {
+              quotedContent = formatQuotedReply(
+                sourceEmail.body_html || sourceEmail.body_plain || "",
+                sourceEmail.body_plain || "",
+                sourceEmail.from_email || "unknown",
+                sourceEmail.received_at || new Date().toISOString()
+              );
             }
           }
         }
@@ -153,8 +202,17 @@ serve(async (req) => {
           }
         }
 
-        // 5) Combine body with signature
-        const bodyHtml = draft.body_html ?? draft.body_plain ?? "";
+        // 5) Combine body with quoted content and signature
+        let bodyHtml = draft.body_html ?? draft.body_plain ?? "";
+        let bodyPlainWithQuote = draft.body_plain ?? "";
+
+        // Append quoted original message if this is a reply
+        if (quotedContent) {
+          bodyHtml += quotedContent.html;
+          bodyPlainWithQuote += quotedContent.plain;
+        }
+
+        // Append signature
         const fullHtml = signatureHtml ? `${bodyHtml}<br/><br/>${signatureHtml}` : bodyHtml;
 
         // 6) Build Resend tags for tracking (used by resend-webhook)
@@ -242,7 +300,7 @@ serve(async (req) => {
             bcc_emails: draft.bcc_emails || [],
             subject: draft.subject,
             body_html: fullHtml,
-            body_plain: draft.body_plain,
+            body_plain: bodyPlainWithQuote,
             mailbox_id: draft.from_mailbox_id,
             contact_id: draft.contact_id,
             direction: "outgoing",
