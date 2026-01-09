@@ -81,26 +81,17 @@ USING (auth.role() = 'authenticated' AND is_active = true);
 -- Admins can manage prompts (full CRUD)
 DROP POLICY IF EXISTS "Admins can manage prompts" ON prompts;
 CREATE POLICY "Admins can manage prompts" ON prompts FOR ALL
-USING (EXISTS (
-    SELECT 1 FROM user_roles ur JOIN roles r ON ur.role_id = r.id
-    WHERE ur.user_id = auth.uid() AND r.name = 'admin'
-));
+USING (public.current_jwt_role() = 'admin');
 
 -- Admins can read version history
 DROP POLICY IF EXISTS "Admins can read versions" ON prompt_versions;
 CREATE POLICY "Admins can read versions" ON prompt_versions FOR SELECT
-USING (EXISTS (
-    SELECT 1 FROM user_roles ur JOIN roles r ON ur.role_id = r.id
-    WHERE ur.user_id = auth.uid() AND r.name = 'admin'
-));
+USING (public.current_jwt_role() = 'admin');
 
 -- Admins can insert version history
 DROP POLICY IF EXISTS "Admins can insert versions" ON prompt_versions;
 CREATE POLICY "Admins can insert versions" ON prompt_versions FOR INSERT
-WITH CHECK (EXISTS (
-    SELECT 1 FROM user_roles ur JOIN roles r ON ur.role_id = r.id
-    WHERE ur.user_id = auth.uid() AND r.name = 'admin'
-));
+WITH CHECK (public.current_jwt_role() = 'admin');
 
 -- Service role can do everything (for Lambda functions)
 DROP POLICY IF EXISTS "Service role full access prompts" ON prompts;
