@@ -169,7 +169,25 @@ serve(async (req) => {
         }
         if (draft.campaign_enrollment_id) {
           tags.push({ name: "campaign_enrollment_id", value: draft.campaign_enrollment_id });
+          
+          // Look up campaign_id from enrollment for resend-webhook scoring
+          const { data: enrollment, error: enrollmentError } = await supabaseAdmin
+            .from("campaign_enrollments")
+            .select("campaign_sequence_id")
+            .eq("id", draft.campaign_enrollment_id)
+            .single();
+          
+          if (enrollment && !enrollmentError && enrollment.campaign_sequence_id) {
+            tags.push({ name: "campaign_id", value: enrollment.campaign_sequence_id });
+            console.log(`Added campaign_id tag: ${enrollment.campaign_sequence_id}`);
+          } else {
+            console.warn(`Could not find campaign_sequence_id for enrollment ${draft.campaign_enrollment_id}`);
+          }
         }
+
+        // Log all tags for debugging
+        console.log(`📧 Sending email for draft ${draft.id}`);
+        console.log(`📨 Tags being sent to Resend:`, JSON.stringify(tags, null, 2));
 
         // 7) Build email payload for Resend
         const emailPayload: {
