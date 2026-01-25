@@ -337,11 +337,18 @@ async function handleStatus(
 
 /**
  * Handle /estimate - Estimate email count for a configuration
+ *
+ * Accepts two formats:
+ * 1. Flat: { mailbox_id, import_since, days_back, months_back, folders }
+ * 2. Nested: { mailbox_id, config: { import_since, days_back, months_back, folders } }
  */
 async function handleEstimate(
-  config: ImportConfig
+  body: Record<string, unknown>
 ): Promise<Response> {
-  const { mailbox_id, ...importConfig } = config;
+  // Support both flat and nested config formats
+  const mailbox_id = body.mailbox_id as string;
+  const nestedConfig = body.config as Record<string, unknown> | undefined;
+  const importConfig = nestedConfig || body;
 
   if (!mailbox_id) {
     return new Response(
@@ -355,7 +362,9 @@ async function handleEstimate(
       mailbox_id,
       config: {
         folders: ["INBOX", "INBOX.Sent"],
-        ...importConfig,
+        import_since: importConfig.import_since,
+        days_back: importConfig.days_back,
+        months_back: importConfig.months_back,
       },
     });
 
@@ -469,8 +478,8 @@ serve(async (req) => {
             { status: 405, headers: { ...corsHeaders, "Content-Type": "application/json" } }
           );
         }
-        const config: ImportConfig = await req.json();
-        return handleEstimate(config);
+        const body = await req.json();
+        return handleEstimate(body);
       }
 
       default:
