@@ -20,7 +20,9 @@ import { corsHeaders } from "../_shared/cors.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
-const EMAIL_SYNC_LAMBDA_URL = Deno.env.get("EMAIL_SYNC_LAMBDA_URL") ?? "";
+
+// Lambda URL cache (fetched from system_config)
+let cachedLambdaUrl: string | null = null;
 
 interface ImportConfig {
   mailbox_id: string;
@@ -37,17 +39,38 @@ interface JobAction {
 }
 
 /**
+ * Get Lambda URL from system_config table (same as email-sync-trigger)
+ */
+async function getLambdaUrl(supabase: ReturnType<typeof createClient>): Promise<string> {
+  if (cachedLambdaUrl) {
+    return cachedLambdaUrl;
+  }
+
+  const { data, error } = await supabase
+    .from("system_config")
+    .select("value")
+    .eq("key", "email_sync_url")
+    .single();
+
+  if (error || !data?.value) {
+    throw new Error("email_sync_url not found in system_config");
+  }
+
+  cachedLambdaUrl = data.value;
+  return cachedLambdaUrl;
+}
+
+/**
  * Invoke Lambda function
  */
 async function invokeLambda(
+  supabase: ReturnType<typeof createClient>,
   mode: string,
   payload: Record<string, unknown>
 ): Promise<Response> {
-  if (!EMAIL_SYNC_LAMBDA_URL) {
-    throw new Error("EMAIL_SYNC_LAMBDA_URL not configured");
-  }
+  const lambdaUrl = await getLambdaUrl(supabase);
 
-  const response = await fetch(EMAIL_SYNC_LAMBDA_URL, {
+  const response = await fetch(lambdaUrl, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -118,7 +141,7 @@ async function handleStart(
 
   // Invoke Lambda with import_init mode (async)
   try {
-    const lambdaResponse = await invokeLambda("import_init", {
+    const lambdaResponse = await invokeLambda(supabase, "import_init", {
       job_id: job.id,
     });
 
@@ -244,7 +267,7 @@ async function handleResume(
 
   // Re-invoke Lambda to continue
   try {
-    await invokeLambda("import_init", { job_id });
+    await invokeLambda(supabase, "import_init", { job_id });
   } catch (err) {
     console.error("Failed to resume Lambda:", err);
   }
@@ -337,11 +360,19 @@ async function handleStatus(
 
 /**
  * Handle /estimate - Estimate email count for a configuration
+ *
+ * Accepts two formats:
+ * 1. Flat: { mailbox_id, import_since, days_back, months_back, folders }
+ * 2. Nested: { mailbox_id, config: { import_since, days_back, months_back, folders } }
  */
 async function handleEstimate(
-  config: ImportConfig
+  supabase: ReturnType<typeof createClient>,
+  body: Record<string, unknown>
 ): Promise<Response> {
-  const { mailbox_id, ...importConfig } = config;
+  // Support both flat and nested config formats
+  const mailbox_id = body.mailbox_id as string;
+  const nestedConfig = body.config as Record<string, unknown> | undefined;
+  const importConfig = nestedConfig || body;
 
   if (!mailbox_id) {
     return new Response(
@@ -351,11 +382,13 @@ async function handleEstimate(
   }
 
   try {
-    const lambdaResponse = await invokeLambda("estimate", {
+    const lambdaResponse = await invokeLambda(supabase, "estimate", {
       mailbox_id,
       config: {
         folders: ["INBOX", "INBOX.Sent"],
-        ...importConfig,
+        import_since: importConfig.import_since,
+        days_back: importConfig.days_back,
+        months_back: importConfig.months_back,
       },
     });
 
@@ -469,8 +502,8 @@ serve(async (req) => {
             { status: 405, headers: { ...corsHeaders, "Content-Type": "application/json" } }
           );
         }
-        const config: ImportConfig = await req.json();
-        return handleEstimate(config);
+        const body = await req.json();
+        return handleEstimate(supabase, body);
       }
 
       default:
