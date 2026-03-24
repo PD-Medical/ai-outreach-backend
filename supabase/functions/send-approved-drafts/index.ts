@@ -87,6 +87,21 @@ serve(async (req) => {
   }
 
   try {
+    // 0) Check global email kill switch
+    const { data: killSwitch } = await supabaseAdmin
+      .from("system_config")
+      .select("value")
+      .eq("key", "email_sending_enabled")
+      .single();
+
+    if (killSwitch && killSwitch.value === false) {
+      console.log("Email sending is disabled via kill switch");
+      return new Response(
+        JSON.stringify({ success: true, processed: 0, message: "Email sending disabled" }),
+        { headers: { "Content-Type": "application/json", ...corsHeaders } },
+      );
+    }
+
     // 1) Find drafts that are approved/auto_approved and not yet sent
     const { data: drafts, error: selectError } = await supabaseAdmin
       .from("email_drafts")
