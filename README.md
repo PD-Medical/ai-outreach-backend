@@ -231,6 +231,8 @@ Edge Functions have a 10-second timeout. Email imports are limited to 500 messag
 
 See `supabase/functions/import-contacts-supervisor/README.md` for detailed function documentation.
 
+## Staging Environment - Updated [08-12-2024]
+
 ## License
 
 MIT

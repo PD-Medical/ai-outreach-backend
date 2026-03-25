@@ -49,6 +49,7 @@ interface PreviewRequest {
     email_purpose: string;
     tone?: 'professional' | 'friendly' | 'formal' | 'concise';
     product_ids?: string[];
+    to?: string; // Recipient email for new emails (when contact not in DB)
   };
 }
 
@@ -98,7 +99,7 @@ serve(async (req) => {
     // Verify mailbox exists and is active
     const { data: mailbox, error: mailboxError } = await supabase
       .from('mailboxes')
-      .select('id, email, name, persona_description, signature, is_active')
+      .select('id, email, name, persona_description, signature_html, is_active')
       .eq('id', from_mailbox_id)
       .single();
 
@@ -132,6 +133,12 @@ serve(async (req) => {
       recipientEmail = contact?.email;
     }
 
+    // Use params.to if explicitly provided (for new emails to contacts not in DB)
+    if (!recipientEmail && params.to) {
+      recipientEmail = params.to;
+      console.log(`Using params.to for recipient: ${recipientEmail}`);
+    }
+
     // Get source email if provided (for reply context)
     let emailContext = null;
     if (email_id) {
@@ -160,7 +167,7 @@ serve(async (req) => {
         to: recipientEmail,
         // Include mailbox context for persona/signature
         mailbox_persona: mailbox.persona_description,
-        mailbox_signature: mailbox.signature,
+        mailbox_signature: mailbox.signature_html,
       },
       // Include pre-fetched context to reduce Lambda lookups
       email_context: emailContext ? {
