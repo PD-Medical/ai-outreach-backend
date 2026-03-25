@@ -1,7 +1,7 @@
 // @ts-nocheck
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2"
-import { Resend } from "https://esm.sh/resend@4.1.0"
+import { Resend } from "https://esm.sh/resend@6.9.4"
 import { corsHeaders } from "../_shared/cors.ts"
 
 type RoleType = "admin" | "sales" | "accounts" | "management"
