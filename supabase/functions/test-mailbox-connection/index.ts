@@ -76,7 +76,7 @@ serve(async (req: Request) => {
     }
 
     // Import IMAP client
-    const { ImapClient } = await import("../_shared/email/deno-imap-client.ts");
+    const { DenoImapClient } = await import("../_shared/email/deno-imap-client.ts");
 
     // Create IMAP connection
     const imapConfig = {
@@ -90,7 +90,7 @@ serve(async (req: Request) => {
 
     console.log(`Testing connection to ${credentials.email} via ${imapConfig.host}:${imapConfig.port}`);
 
-    const client = new ImapClient(imapConfig);
+    const client = new DenoImapClient(imapConfig);
 
     try {
       await client.connect();
