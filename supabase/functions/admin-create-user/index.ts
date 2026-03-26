@@ -3,6 +3,7 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2"
 import { Resend } from "https://esm.sh/resend@6.9.4"
 import { corsHeaders } from "../_shared/cors.ts"
+import { requireAuth } from "../_shared/auth.ts"
 
 type RoleType = "admin" | "sales" | "accounts" | "management"
 
@@ -56,6 +57,10 @@ serve(async (request) => {
   if (request.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders })
   }
+
+  // Auth check
+  const auth = await requireAuth(request)
+  if (auth instanceof Response) return auth
 
   if (request.method !== "POST") {
     return new Response(JSON.stringify({ success: false, message: "Method not allowed" }), {

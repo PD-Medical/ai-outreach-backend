@@ -26,5 +26,53 @@ enable_signup = true
 double_confirm_changes = true
 enable_confirmations = false
 
+# Public webhooks (no user auth needed)
 [functions.resend-webhook]
+verify_jwt = false
+
+# Frontend-facing functions: verify_jwt = false because sb_publishable_* keys
+# are not JWTs. Auth is enforced inside each function via requireAuth().
+[functions.test-mailbox-connection]
+verify_jwt = false
+
+[functions.campaign-create]
+verify_jwt = false
+
+[functions.campaign-target-preview]
+verify_jwt = false
+
+[functions.email-agent-invoke]
+verify_jwt = false
+
+[functions.email-agent-preview]
+verify_jwt = false
+
+[functions.email-agent-resume]
+verify_jwt = false
+
+[functions.email-import-job]
+verify_jwt = false
+
+[functions.email-sync-trigger]
+verify_jwt = false
+
+[functions.email-template-generate]
+verify_jwt = false
+
+[functions.get-tools]
+verify_jwt = false
+
+[functions.admin-create-user]
+verify_jwt = false
+
+[functions.admin-delete-user]
+verify_jwt = false
+
+[functions.admin-regenerate-password]
+verify_jwt = false
+
+[functions.update-role-permission]
+verify_jwt = false
+
+[functions.eventbridge-control]
 verify_jwt = false
