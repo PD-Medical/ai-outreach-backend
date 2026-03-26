@@ -1,6 +1,7 @@
 // @ts-nocheck
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { corsHeaders } from "../_shared/cors.ts";
+import { requireAuth } from "../_shared/auth.ts";
 
 const AWS_ACCESS_KEY_ID = Deno.env.get("AWS_EVENTBRIDGE_ACCESS_KEY_ID") ?? "";
 const AWS_SECRET_ACCESS_KEY = Deno.env.get("AWS_EVENTBRIDGE_SECRET_ACCESS_KEY") ?? "";
@@ -67,6 +68,10 @@ serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
   }
+
+  // Auth check
+  const auth = await requireAuth(req);
+  if (auth instanceof Response) return auth;
 
   if (!AWS_ACCESS_KEY_ID || !AWS_SECRET_ACCESS_KEY) {
     return new Response(

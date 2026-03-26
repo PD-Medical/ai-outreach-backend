@@ -14,6 +14,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders, handleCors } from "../_shared/cors.ts";
+import { requireAuth } from "../_shared/auth.ts";
 
 // Lambda Function URL will be fetched from system_config at runtime
 
@@ -97,6 +98,10 @@ serve(async (req) => {
   // Handle CORS preflight
   const corsResponse = handleCors(req);
   if (corsResponse) return corsResponse;
+
+  // Auth check
+  const auth = await requireAuth(req);
+  if (auth instanceof Response) return auth;
 
   // Only allow POST requests
   if (req.method !== "POST") {
