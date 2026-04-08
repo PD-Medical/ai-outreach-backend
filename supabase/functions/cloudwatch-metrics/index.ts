@@ -43,38 +43,6 @@ async function getSignatureKey(key: string, dateStamp: string, region: string, s
   return hmacSha256(kService, "aws4_request");
 }
 
-async function signedRequest(payload: string): Promise<Response> {
-  const service = "monitoring";
-  const host = `${service}.${AWS_REGION}.amazonaws.com`;
-  const now = new Date();
-  const amzDate = now.toISOString().replace(/[:\-]|\.\d{3}/g, "");
-  const dateStamp = amzDate.slice(0, 8);
-
-  const canonicalHeaders = `content-type:application/json\nhost:${host}\nx-amz-date:${amzDate}\n`;
-  const signedHeaders = "content-type;host;x-amz-date";
-  const payloadHash = await sha256(payload);
-
-  const canonicalRequest = `POST\n/\n\n${canonicalHeaders}\n${signedHeaders}\n${payloadHash}`;
-  const credentialScope = `${dateStamp}/${AWS_REGION}/${service}/aws4_request`;
-  const stringToSign = `AWS4-HMAC-SHA256\n${amzDate}\n${credentialScope}\n${await sha256(canonicalRequest)}`;
-
-  const signingKey = await getSignatureKey(AWS_SECRET_ACCESS_KEY, dateStamp, AWS_REGION, service);
-  const signatureBytes = await hmacSha256(signingKey, stringToSign);
-  const signature = Array.from(new Uint8Array(signatureBytes)).map(b => b.toString(16).padStart(2, "0")).join("");
-
-  const authorization = `AWS4-HMAC-SHA256 Credential=${AWS_ACCESS_KEY_ID}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
-
-  return fetch(`https://${host}/`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Amz-Date": amzDate,
-      "Authorization": authorization,
-    },
-    body: payload,
-  });
-}
-
 // Period config: maps user-friendly names to CloudWatch parameters
 const PERIOD_CONFIG: Record<string, { seconds: number; step: number }> = {
   "1h":  { seconds: 3600,     step: 60 },      // 1-minute granularity
@@ -244,6 +212,8 @@ serve(async (req) => {
     );
   }
 
+  const VALID_ENVIRONMENTS = ["production", "staging", "dev"];
+
   try {
     const body = await req.json();
     const period = body.period || "24h";
@@ -252,6 +222,13 @@ serve(async (req) => {
     if (!PERIOD_CONFIG[period]) {
       return new Response(
         JSON.stringify({ success: false, error: `Invalid period: ${period}. Valid: 1h, 6h, 24h, 7d` }),
+        { status: 400, headers: { "Content-Type": "application/json", ...corsHeaders } }
+      );
+    }
+
+    if (!VALID_ENVIRONMENTS.includes(environment)) {
+      return new Response(
+        JSON.stringify({ success: false, error: `Invalid environment: ${environment}. Valid: ${VALID_ENVIRONMENTS.join(", ")}` }),
         { status: 400, headers: { "Content-Type": "application/json", ...corsHeaders } }
       );
     }
@@ -308,9 +285,12 @@ serve(async (req) => {
     const totals = {
       invocations: functions.reduce((s: number, f: any) => s + f.invocations, 0),
       errors: functions.reduce((s: number, f: any) => s + f.errors, 0),
-      avgDuration: functions.length > 0
-        ? Math.round(functions.reduce((s: number, f: any) => s + f.avgDuration, 0) / functions.filter((f: any) => f.avgDuration > 0).length || 0)
-        : 0,
+      avgDuration: (() => {
+        const withDuration = functions.filter((f: any) => f.avgDuration > 0);
+        return withDuration.length > 0
+          ? Math.round(withDuration.reduce((s: number, f: any) => s + f.avgDuration, 0) / withDuration.length)
+          : 0;
+      })(),
       throttles: functions.reduce((s: number, f: any) => s + f.throttles, 0),
     };
 
