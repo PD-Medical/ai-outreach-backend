@@ -91,6 +91,13 @@ serve(async (req) => {
       );
     }
 
+    if (!rule_name.startsWith("ai-outreach-")) {
+      return new Response(
+        JSON.stringify({ success: false, error: "Invalid rule_name: must start with 'ai-outreach-'" }),
+        { status: 400, headers: { "Content-Type": "application/json", ...corsHeaders } }
+      );
+    }
+
     const host = `events.${AWS_REGION}.amazonaws.com`;
     let result: Response;
 

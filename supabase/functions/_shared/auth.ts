@@ -41,3 +41,49 @@ export async function requireAuth(
 
   return { user };
 }
+
+/**
+ * Validate the user's Bearer token AND verify they have the "admin" role.
+ * Returns { user } on success, a 401 Response if not authenticated,
+ * or a 403 Response if authenticated but not an admin.
+ *
+ * Usage:
+ *   const auth = await requireAdmin(req);
+ *   if (auth instanceof Response) return auth;
+ *   const { user } = auth;
+ */
+export async function requireAdmin(
+  req: Request
+): Promise<{ user: any } | Response> {
+  const auth = await requireAuth(req);
+  if (auth instanceof Response) return auth;
+
+  const { user } = auth;
+
+  const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
+    auth: { autoRefreshToken: false, persistSession: false },
+  });
+
+  // Look up the caller's profile to check their role
+  const { data: profile, error: profileError } = await supabase
+    .from("profiles")
+    .select("role")
+    .eq("auth_user_id", user.id)
+    .maybeSingle();
+
+  if (profileError || !profile) {
+    return new Response(
+      JSON.stringify({ error: "Forbidden: unable to verify admin role" }),
+      { status: 403, headers: { "Content-Type": "application/json", ...corsHeaders } }
+    );
+  }
+
+  if (profile.role !== "admin") {
+    return new Response(
+      JSON.stringify({ error: "Forbidden: admin role required" }),
+      { status: 403, headers: { "Content-Type": "application/json", ...corsHeaders } }
+    );
+  }
+
+  return { user };
+}

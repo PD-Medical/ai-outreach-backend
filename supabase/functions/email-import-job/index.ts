@@ -17,6 +17,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.0";
 import { corsHeaders } from "../_shared/cors.ts";
+import { requireAuth } from "../_shared/auth.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
@@ -422,21 +423,18 @@ serve(async (req) => {
     return new Response(null, { headers: corsHeaders });
   }
 
+  // Auth check
+  const auth = await requireAuth(req);
+  if (auth instanceof Response) return auth;
+  const { user: authUser } = auth;
+
   const url = new URL(req.url);
   const path = url.pathname.split("/").pop() || "";
 
   // Create Supabase client
   const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
 
-  // Get user from auth header
-  const authHeader = req.headers.get("Authorization");
-  let userId = "";
-
-  if (authHeader) {
-    const token = authHeader.replace("Bearer ", "");
-    const { data: { user } } = await supabase.auth.getUser(token);
-    userId = user?.id || "";
-  }
+  const userId = authUser?.id || "";
 
   try {
     // Route based on path
