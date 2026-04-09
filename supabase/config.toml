@@ -59,6 +59,12 @@ verify_jwt = false
 [functions.email-template-generate]
 verify_jwt = false
 
+[functions.sync-mailchimp-newsletters]
+verify_jwt = false
+
+[functions.mailchimp-newsletter-sync-scheduler]
+verify_jwt = false
+
 [functions.get-tools]
 verify_jwt = false
 
