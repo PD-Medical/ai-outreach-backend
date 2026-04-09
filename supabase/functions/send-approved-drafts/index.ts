@@ -364,6 +364,13 @@ serve(async (req) => {
           continue;
         }
 
+        // 11) Update conversation stats so email_count stays accurate
+        if (draft.conversation_id) {
+          await supabaseAdmin.rpc('update_conversation_stats', {
+            p_conversation_id: draft.conversation_id
+          });
+        }
+
         console.log(`Sent email for draft ${draft.id} via ${mailboxEmail}, Resend ID: ${resendMessageId}`);
         processed += 1;
       } catch (err) {

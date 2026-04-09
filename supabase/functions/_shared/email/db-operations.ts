@@ -124,42 +124,36 @@ export async function getOrCreateConversation(
   contact: Contact,
   mailboxId: string
 ): Promise<Conversation> {
-  // Check if conversation exists for this thread
-  const { data: existing, error: findError } = await supabase
+  // Upsert: insert if thread_id doesn't exist, ignore if it does (race-safe)
+  await supabase
     .from('conversations')
-    .select('*')
-    .eq('thread_id', threadId)
-    .single();
-
-  if (existing && !findError) {
-    return existing as Conversation;
-  }
-
-  // Create new conversation
-  const { data: newConversation, error: createError } = await supabase
-    .from('conversations')
-    .insert({
+    .upsert({
       thread_id: threadId,
       subject: normalizeSubject(email.subject),
       mailbox_id: mailboxId,
       organization_id: contact.organization_id,
       primary_contact_id: contact.id,
-      email_count: 0, // Will be updated when email is inserted
+      email_count: 0,
       first_email_at: email.received_at,
       last_email_at: email.received_at,
       last_email_direction: email.direction,
       status: 'active',
       requires_response: email.direction === 'incoming',
       created_at: new Date().toISOString()
-    })
-    .select()
+    }, { onConflict: 'thread_id', ignoreDuplicates: true });
+
+  // Always fetch the authoritative record
+  const { data: conversation, error: fetchError } = await supabase
+    .from('conversations')
+    .select('*')
+    .eq('thread_id', threadId)
     .single();
 
-  if (createError) {
-    throw new DatabaseError(`Failed to create conversation: ${createError.message}`);
+  if (fetchError || !conversation) {
+    throw new DatabaseError(`Failed to get/create conversation: ${fetchError?.message}`);
   }
 
-  return newConversation as Conversation;
+  return conversation as Conversation;
 }
 
 /**
