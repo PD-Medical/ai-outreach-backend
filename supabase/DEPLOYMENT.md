@@ -145,7 +145,7 @@ INSERT INTO mailboxes (
   'john@pdmedical.com.au',
   'John Smith',
   'personal',
-  'mail.pdmedical.com.au',
+  'cp-wc01.iad01.ds.network',
   993,
   'john@pdmedical.com.au',
   true
@@ -519,7 +519,7 @@ FROM mailboxes WHERE id = '[mailbox-id]';
 **Test IMAP connection manually:**
 ```bash
 # Use openssl to test IMAP connection
-openssl s_client -connect mail.pdmedical.com.au:993
+openssl s_client -connect cp-wc01.iad01.ds.network:993
 
 # Then try to login
 a1 LOGIN username@domain.com password
@@ -695,5 +695,4 @@ SELECT email, last_synced_at, sync_status FROM mailboxes;
 -- Count emails
 SELECT COUNT(*) FROM emails;
 ```
-
 

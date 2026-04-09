@@ -68,7 +68,7 @@ This system automatically syncs emails from IMAP servers into a Supabase databas
                               ▲
                               │
 ┌─────────────────────────────┼─────────────────────────────┐
-│         IMAP Servers (e.g., mail.pdmedical.com.au)         │
+│      IMAP Servers (e.g., cp-wc01.iad01.ds.network)         │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -345,5 +345,4 @@ For issues or questions:
 ## License
 
 Proprietary - PD Medical
-
 

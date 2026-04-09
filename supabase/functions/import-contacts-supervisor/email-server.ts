@@ -73,7 +73,7 @@ async function processEmailAccount(
   limit: number
 ): Promise<Contact[]> {
   
-  console.log(`[EMAIL] Connecting to mail.pdmedical.com.au as ${emailId}`);
+  console.log(`[EMAIL] Connecting to cp-wc01.iad01.ds.network as ${emailId}`);
 
   const contacts = new Map<string, Contact>();
   
@@ -121,7 +121,7 @@ async function processFolder(
   console.log("[CONNECT] Attempting port 143...");
   try {
     conn = await Deno.connect({
-      hostname: "mail.pdmedical.com.au",
+      hostname: "cp-wc01.iad01.ds.network",
       port: 143,
     });
     console.log("[SUCCESS] Connected via port 143");
@@ -132,7 +132,7 @@ async function processFolder(
     console.log("[CONNECT] Attempting port 993 (TLS)...");
     try {
       conn = await Deno.connectTls({
-        hostname: "mail.pdmedical.com.au",
+        hostname: "cp-wc01.iad01.ds.network",
         port: 993,
       });
       console.log("[SUCCESS] Connected via port 993");

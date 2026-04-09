@@ -1604,7 +1604,7 @@ $$;
 -- Name: upsert_mailbox(uuid, text, text, text, text, integer, text, text, boolean, text, text); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.upsert_mailbox(p_id uuid DEFAULT NULL::uuid, p_email text DEFAULT NULL::text, p_name text DEFAULT NULL::text, p_type text DEFAULT 'personal'::text, p_imap_host text DEFAULT 'mail.pdmedical.com.au'::text, p_imap_port integer DEFAULT 993, p_imap_username text DEFAULT NULL::text, p_password text DEFAULT NULL::text, p_is_active boolean DEFAULT true, p_persona_description text DEFAULT NULL::text, p_signature_html text DEFAULT NULL::text) RETURNS jsonb
+CREATE FUNCTION public.upsert_mailbox(p_id uuid DEFAULT NULL::uuid, p_email text DEFAULT NULL::text, p_name text DEFAULT NULL::text, p_type text DEFAULT 'personal'::text, p_imap_host text DEFAULT 'cp-wc01.iad01.ds.network'::text, p_imap_port integer DEFAULT 993, p_imap_username text DEFAULT NULL::text, p_password text DEFAULT NULL::text, p_is_active boolean DEFAULT true, p_persona_description text DEFAULT NULL::text, p_signature_html text DEFAULT NULL::text) RETURNS jsonb
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public'
     AS $$
@@ -2172,7 +2172,7 @@ CREATE TABLE public.mailboxes (
     email character varying NOT NULL,
     name character varying NOT NULL,
     type character varying,
-    imap_host character varying DEFAULT 'mail.pdmedical.com.au'::character varying,
+    imap_host character varying DEFAULT 'cp-wc01.iad01.ds.network'::character varying,
     imap_port integer DEFAULT 993,
     imap_username character varying,
     is_active boolean DEFAULT true,
@@ -4888,4 +4888,3 @@ ALTER TABLE public.workflows ENABLE ROW LEVEL SECURITY;
 --
 -- PostgreSQL database dump complete
 --
-
