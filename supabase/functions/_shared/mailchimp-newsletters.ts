@@ -41,6 +41,10 @@ interface MailchimpCampaignContent {
   plain_text?: string;
 }
 
+interface MailchimpCampaignListResponse {
+  campaigns?: MailchimpCampaign[];
+}
+
 export function normalizeMailchimpNewsletterSubject(subject?: string | null): string {
   if (!subject) return '';
 
@@ -198,18 +202,39 @@ export async function syncRecentMailchimpCampaignsToDb(
   } = {},
 ): Promise<MailchimpNewsletter[]> {
   const limit = Math.min(Math.max(options.limit ?? 25, 1), 100);
-  const campaigns = await mailchimpFetch<{ campaigns?: MailchimpCampaign[] }>(
-    `/campaigns?status=sent&count=${limit}&sort_field=send_time&sort_dir=DESC`,
-  );
-
   const sentSince = options.sentSince ? new Date(options.sentSince) : null;
   const results: MailchimpNewsletter[] = [];
+  const pageSize = 100;
+  let offset = 0;
+  let reachedWindowBoundary = false;
 
-  for (const campaign of campaigns.campaigns ?? []) {
-    if (sentSince && campaign.send_time && new Date(campaign.send_time) < sentSince) {
-      continue;
+  while (results.length < limit && !reachedWindowBoundary) {
+    const campaignsPage = await mailchimpFetch<MailchimpCampaignListResponse>(
+      `/campaigns?status=sent&count=${pageSize}&offset=${offset}&sort_field=send_time&sort_dir=DESC`,
+    );
+
+    const campaigns = campaignsPage.campaigns ?? [];
+    if (campaigns.length === 0) {
+      break;
     }
-    results.push(await syncMailchimpCampaignToDb(supabase, campaign.id));
+
+    for (const campaign of campaigns) {
+      if (sentSince && campaign.send_time && new Date(campaign.send_time) < sentSince) {
+        reachedWindowBoundary = true;
+        break;
+      }
+
+      results.push(await syncMailchimpCampaignToDb(supabase, campaign.id));
+      if (results.length >= limit) {
+        break;
+      }
+    }
+
+    if (campaigns.length < pageSize) {
+      break;
+    }
+
+    offset += campaigns.length;
   }
 
   return results;
