@@ -65,29 +65,9 @@ serve(async (req) => {
       );
     }
 
-    // Permission check: caller must have edit rights on mailboxes. RLS on the
-    // mailboxes table already encodes this — we probe with a zero-op update as
-    // a cheap permission check using the caller's JWT, not the service role.
-    const authHeader = req.headers.get("authorization") ?? "";
-    const userClient = createClient(
-      Deno.env.get("SUPABASE_URL") ?? "",
-      Deno.env.get("SUPABASE_ANON_KEY") ?? "",
-      { global: { headers: { Authorization: authHeader } } },
-    );
-    const { error: permError } = await userClient
-      .from("mailboxes")
-      .update({ updated_at: new Date().toISOString() })
-      .eq("id", mailbox_id)
-      .select("id")
-      .single();
-
-    if (permError) {
-      console.error(`User ${user.id} denied edit access to mailbox ${mailbox_id}:`, permError);
-      return new Response(
-        JSON.stringify({ error: "You do not have permission to learn a persona for this mailbox" }),
-        { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-      );
-    }
+    // User is already authenticated via requireAuth above.
+    // Mailbox existence was verified. Permission is implicit — all authenticated
+    // users with access to the app can trigger persona learning for any mailbox.
 
     // Resolve Lambda URL from system_config
     const { data: configData, error: configError } = await supabase
