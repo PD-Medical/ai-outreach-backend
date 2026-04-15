@@ -31,7 +31,7 @@ import { corsHeaders } from "../_shared/cors.ts";
 import { requireAuth } from "../_shared/auth.ts";
 
 interface InvokeRequest {
-  action: 'draft' | 'self_learn';
+  action: 'draft';
   email_id?: string;
   contact_id?: string;
   from_mailbox_id: string;
@@ -71,41 +71,11 @@ serve(async (req) => {
     const body: InvokeRequest = await req.json();
     const { action, email_id, contact_id, from_mailbox_id, conversation_id, thread_id, params, source } = body;
 
-    // Validate action
-    const ALLOWED_ACTIONS = ['draft', 'self_learn'];
-    if (!ALLOWED_ACTIONS.includes(action)) {
+    // Validate required fields
+    if (action !== 'draft') {
       return new Response(
-        JSON.stringify({ error: `Invalid action. Must be one of: ${ALLOWED_ACTIONS.join(', ')}` }),
+        JSON.stringify({ error: "Invalid action. Must be: draft" }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
-
-    // self_learn bypasses draft-specific validation — just forward to Lambda
-    if (action === 'self_learn') {
-      const { data: configData } = await supabase
-        .from('system_config')
-        .select('value')
-        .eq('key', 'email_agent_url')
-        .single();
-
-      const lambdaUrl = configData?.value;
-      if (!lambdaUrl) {
-        return new Response(
-          JSON.stringify({ error: "Email agent service not configured" }),
-          { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
-      }
-
-      const lambdaResponse = await fetch(lambdaUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-
-      const lambdaResult = await lambdaResponse.json();
-      return new Response(
-        JSON.stringify(lambdaResult),
-        { status: lambdaResponse.ok ? 200 : lambdaResponse.status, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
