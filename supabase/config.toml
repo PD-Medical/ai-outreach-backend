@@ -82,3 +82,9 @@ verify_jwt = false
 
 [functions.eventbridge-control]
 verify_jwt = false
+
+[functions.learn-persona]
+verify_jwt = false
+
+[functions.training-self-learn]
+verify_jwt = false
