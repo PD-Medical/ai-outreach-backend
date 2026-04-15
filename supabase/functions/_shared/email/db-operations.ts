@@ -416,6 +416,18 @@ export async function importEmail(
   // Update conversation stats
   await updateConversationStats(supabase, conversation.id);
 
+  // Link inbound emails to Mailchimp newsletters (best-effort, non-blocking on failure)
+  if (email.direction === 'incoming') {
+    const { linkEmailToMailchimpNewsletter } = await import('../mailchimp-newsletters.ts');
+    await linkEmailToMailchimpNewsletter(supabase, emailId, {
+      subject: email.subject,
+      in_reply_to: email.in_reply_to,
+      email_references: email.references,
+      received_at: email.received_at,
+      mailbox_id: mailboxId,
+    });
+  }
+
   return { emailId, created: true };
 }
 

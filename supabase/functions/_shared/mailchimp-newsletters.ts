@@ -1,6 +1,12 @@
 import { SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
-const MAILCHIMP_REPLY_HOST_MARKERS = ['rsgsv.net', 'mailchimpapp.net'];
+const MAILCHIMP_REPLY_HOST_MARKERS = ['rsgsv.net', 'mcsv.net', 'mailchimpapp.net'];
+
+// Matches Mailchimp's in_reply_to / references format. Example:
+//   dbf3676ae72647d2716973162.ad0a015381.20260325222934.fa6288cf73.660aebd8@mail75.atl51.rsgsv.net
+// The 4th dot-segment is the 10-char hex campaign ID.
+const MAILCHIMP_CAMPAIGN_ID_PATTERN =
+  /\.([a-f0-9]{10})\.[a-f0-9]+@mail[^.]+\.[^.]+\.(?:rsgsv|mcsv|mailchimpapp)\.net/i;
 
 export interface MailchimpNewsletter {
   id: string;
@@ -65,6 +71,120 @@ export function isLikelyMailchimpReply(input: {
   const replyHeaders = `${input.in_reply_to ?? ''} ${input.email_references ?? ''}`.toLowerCase();
   const headerSignal = MAILCHIMP_REPLY_HOST_MARKERS.some(marker => replyHeaders.includes(marker));
   return subjectSignal || headerSignal;
+}
+
+export function extractMailchimpCampaignId(
+  inReplyTo?: string | null,
+  references?: string | null,
+): string | null {
+  const sources = [inReplyTo, references].filter((s): s is string => !!s);
+  for (const source of sources) {
+    const match = source.match(MAILCHIMP_CAMPAIGN_ID_PATTERN);
+    if (match?.[1]) return match[1];
+  }
+  return null;
+}
+
+export interface MailchimpLinkResult {
+  newsletterId: string;
+  method: 'header_campaign_id' | 'normalized_subject';
+  confidence: number;
+  reason: string;
+}
+
+/**
+ * Try to link an inbound email to a Mailchimp newsletter.
+ * Tier 1 (confidence 1.0): extract campaign ID from in_reply_to/references headers.
+ * Tier 2 (confidence 0.85): match normalized subject within 60d of newsletter send.
+ * Updates the emails row on match. Returns match info or null. Never throws.
+ */
+export async function linkEmailToMailchimpNewsletter(
+  supabase: SupabaseClient,
+  emailId: string,
+  input: {
+    subject?: string | null;
+    in_reply_to?: string | null;
+    email_references?: string | null;
+    received_at?: string | null;
+    mailbox_id?: string | null;
+  },
+): Promise<MailchimpLinkResult | null> {
+  try {
+    // Tier 1: campaign ID from headers
+    const campaignId = extractMailchimpCampaignId(input.in_reply_to, input.email_references);
+    if (campaignId) {
+      const { data: newsletter } = await supabase
+        .from('mailchimp_newsletters')
+        .select('id')
+        .eq('mailchimp_campaign_id', campaignId)
+        .maybeSingle();
+
+      if (newsletter?.id) {
+        const result: MailchimpLinkResult = {
+          newsletterId: newsletter.id,
+          method: 'header_campaign_id',
+          confidence: 1.0,
+          reason: `Extracted campaign ID ${campaignId} from in_reply_to/references (Mailchimp relay)`,
+        };
+        await applyLink(supabase, emailId, result);
+        return result;
+      }
+    }
+
+    // Tier 2: normalized subject within 60 days of send
+    const normalized = normalizeMailchimpNewsletterSubject(input.subject);
+    if (!normalized) return null;
+
+    const receivedAt = input.received_at ? new Date(input.received_at) : new Date();
+    const windowStart = new Date(receivedAt.getTime() - 60 * 24 * 60 * 60 * 1000).toISOString();
+    const windowEnd = new Date(receivedAt.getTime() + 24 * 60 * 60 * 1000).toISOString();
+
+    let query = supabase
+      .from('mailchimp_newsletters')
+      .select('id, subject, mailbox_id, sent_at')
+      .eq('normalized_subject', normalized)
+      .gte('sent_at', windowStart)
+      .lte('sent_at', windowEnd)
+      .order('sent_at', { ascending: false })
+      .limit(1);
+
+    if (input.mailbox_id) {
+      query = query.or(`mailbox_id.eq.${input.mailbox_id},mailbox_id.is.null`);
+    }
+
+    const { data: newsletter } = await query.maybeSingle();
+    if (newsletter?.id) {
+      const result: MailchimpLinkResult = {
+        newsletterId: newsletter.id,
+        method: 'normalized_subject',
+        confidence: 0.85,
+        reason: `Matched normalized subject to newsletter: ${newsletter.subject}`,
+      };
+      await applyLink(supabase, emailId, result);
+      return result;
+    }
+
+    return null;
+  } catch (err) {
+    console.error('[mailchimp-link] Failed to link email to newsletter:', err);
+    return null;
+  }
+}
+
+async function applyLink(
+  supabase: SupabaseClient,
+  emailId: string,
+  result: MailchimpLinkResult,
+): Promise<void> {
+  await supabase
+    .from('emails')
+    .update({
+      mailchimp_newsletter_id: result.newsletterId,
+      mailchimp_match_method: result.method,
+      mailchimp_match_confidence: result.confidence,
+      mailchimp_match_reason: result.reason,
+    })
+    .eq('id', emailId);
 }
 
 function getMailchimpApiKey(): string {
