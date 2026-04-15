@@ -218,7 +218,13 @@ serve(async (req) => {
       .select("value")
       .eq("key", "training_model")
       .single();
-    const model = (modelConfig?.value as string) || "deepseek/deepseek-v3.2";
+    // system_config stores JSONB — value comes back as a JSON type (string with quotes).
+    // Strip surrounding quotes if present.
+    let model = String(modelConfig?.value ?? "deepseek/deepseek-v3.2");
+    if (model.startsWith('"') && model.endsWith('"')) {
+      model = model.slice(1, -1);
+    }
+    console.log(`Using model: ${model}`);
 
     // Verify session
     const { data: session, error: sessErr } = await supabase
