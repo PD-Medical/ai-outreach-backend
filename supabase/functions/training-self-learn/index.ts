@@ -269,38 +269,50 @@ serve(async (req) => {
 
     console.log(`Processing ${feedbackItems.length} feedback items for session ${training_session_id}`);
 
-    // ─── Phase 1: Per-feedback LLM calls ───────────────────────────────
+    // ─── Phase 1: Per-feedback LLM calls (concurrent) ─────────────────
 
     const validReflections: Array<{ decision: string; key_reflection: string; confidence_reasoning: string }> = [];
     let totalRevisedConfidence = 0;
     let totalGenerationConfidence = 0;
     let validCount = 0;
 
-    for (const item of feedbackItems as unknown as FeedbackItem[]) {
-      try {
-        const draft = item.email_drafts;
+    // Pre-fetch all conversation threads in parallel
+    const threadPromises = (feedbackItems as unknown as FeedbackItem[]).map(async (item) => {
+      const draft = item.email_drafts;
+      if (!draft.conversation_id) return { item, thread: [] as ThreadEmail[] };
+      const { data: emails } = await supabase
+        .from("emails")
+        .select("from_email, from_name, subject, body_plain, direction, received_at")
+        .eq("conversation_id", draft.conversation_id)
+        .order("received_at", { ascending: true })
+        .limit(20);
+      return { item, thread: (emails || []) as ThreadEmail[] };
+    });
+    const itemsWithThreads = await Promise.all(threadPromises);
 
-        // Fetch conversation thread
-        let thread: ThreadEmail[] = [];
-        if (draft.conversation_id) {
-          const { data: emails } = await supabase
-            .from("emails")
-            .select("from_email, from_name, subject, body_plain, direction, received_at")
-            .eq("conversation_id", draft.conversation_id)
-            .order("received_at", { ascending: true })
-            .limit(20);
-          thread = (emails || []) as ThreadEmail[];
-        }
-
-        // LLM call
+    // Run all LLM calls concurrently
+    const llmResults = await Promise.allSettled(
+      itemsWithThreads.map(async ({ item, thread }) => {
         const result = (await callLLM(
           model,
           openRouterKey,
           PER_FEEDBACK_SYSTEM,
           buildPerFeedbackPrompt(item, thread),
         )) as unknown as PerFeedbackResult;
+        return { item, result };
+      })
+    );
 
-        // Write results
+    // Process results and write back
+    for (const settled of llmResults) {
+      if (settled.status === "rejected") {
+        console.error("LLM call failed:", settled.reason);
+        continue;
+      }
+      const { item, result } = settled.value;
+      const draft = item.email_drafts;
+
+      try {
         await supabase
           .from("email_training_feedback")
           .update({
@@ -315,24 +327,23 @@ serve(async (req) => {
           .from("email_drafts")
           .update({ revised_confidence: result.revised_confidence })
           .eq("id", draft.id);
-
-        // Accumulate
-        totalRevisedConfidence += result.revised_confidence;
-        totalGenerationConfidence += (draft.generation_confidence ?? 0);
-
-        if (result.feedback_valid) {
-          validCount++;
-          validReflections.push({
-            decision: item.decision,
-            key_reflection: result.key_reflection,
-            confidence_reasoning: result.confidence_reasoning,
-          });
-        }
-
-        console.log(`Feedback ${item.id}: valid=${result.feedback_valid}, confidence=${result.revised_confidence}`);
       } catch (err) {
-        console.error(`Failed to process feedback ${item.id}:`, err);
+        console.error(`Failed to write results for ${item.id}:`, err);
       }
+
+      totalRevisedConfidence += result.revised_confidence ?? 0;
+      totalGenerationConfidence += (draft.generation_confidence ?? 0);
+
+      if (result.feedback_valid) {
+        validCount++;
+        validReflections.push({
+          decision: item.decision,
+          key_reflection: result.key_reflection,
+          confidence_reasoning: result.confidence_reasoning,
+        });
+      }
+
+      console.log(`Feedback ${item.id}: valid=${result.feedback_valid}, confidence=${result.revised_confidence}`);
     }
 
     const avgRevisedConfidence = feedbackItems.length > 0
