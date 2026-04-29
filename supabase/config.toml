@@ -59,6 +59,12 @@ verify_jwt = false
 [functions.email-template-generate]
 verify_jwt = false
 
+[functions.sync-mailchimp-newsletters]
+verify_jwt = false
+
+[functions.mailchimp-newsletter-sync-scheduler]
+verify_jwt = false
+
 [functions.get-tools]
 verify_jwt = false
 
@@ -75,4 +81,13 @@ verify_jwt = false
 verify_jwt = false
 
 [functions.eventbridge-control]
+verify_jwt = false
+
+[functions.cloudwatch-metrics]
+verify_jwt = false
+
+[functions.learn-persona]
+verify_jwt = false
+
+[functions.training-self-learn]
 verify_jwt = false
