@@ -1,7 +1,8 @@
 -- 20260501014000_v_email_activity.sql
 -- Joined view used by the Activity log in the UI.
 -- Adjust column selection if your `emails` table has different fields.
-CREATE OR REPLACE VIEW v_email_activity AS
+CREATE OR REPLACE VIEW v_email_activity
+WITH (security_invoker = true) AS
 SELECT
   e.id,
   e.mailbox_id,
@@ -47,4 +48,4 @@ SELECT
 FROM emails e
 LEFT JOIN mailboxes m ON m.id = e.mailbox_id;
 
-GRANT SELECT ON v_email_activity TO authenticated, service_role;
+GRANT SELECT ON v_email_activity TO service_role;
