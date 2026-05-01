@@ -7,7 +7,7 @@ SELECT
   e.mailbox_id,
   m.email AS mailbox_email,
   m.name AS mailbox_name,
-  e.from_address,
+  e.from_email AS from_address,
   e.from_name,
   e.subject,
   e.imap_folder,
@@ -22,12 +22,12 @@ SELECT
       'workflow_id', we.workflow_id,
       'workflow_name', w.name,
       'status', we.status,
-      'matched_at', we.created_at
+      'matched_at', we.started_at
     )
     FROM workflow_executions we
     LEFT JOIN workflows w ON w.id = we.workflow_id
     WHERE we.email_id = e.id
-    ORDER BY we.created_at DESC
+    ORDER BY we.started_at DESC
     LIMIT 1
   ) AS latest_workflow,
   -- Latest unresolved import error, if any
