@@ -8,22 +8,14 @@ AS $$
 DECLARE
   v_group_id UUID;
 BEGIN
-  -- Try to find existing unresolved group
-  SELECT id INTO v_group_id
-  FROM email_import_failure_groups
-  WHERE error_signature = p_error_signature
-    AND resolved_at IS NULL;
-
-  IF v_group_id IS NULL THEN
-    INSERT INTO email_import_failure_groups (error_signature, error_pattern)
-    VALUES (p_error_signature, p_error_pattern)
-    RETURNING id INTO v_group_id;
-  ELSE
-    UPDATE email_import_failure_groups
+  INSERT INTO email_import_failure_groups (error_signature, error_pattern)
+  VALUES (p_error_signature, p_error_pattern)
+  ON CONFLICT (error_signature) DO UPDATE
     SET last_seen_at = now(),
-        occurrence_count = occurrence_count + 1
-    WHERE id = v_group_id;
-  END IF;
+        occurrence_count = email_import_failure_groups.occurrence_count + 1,
+        -- If a previously resolved group recurs, clear resolved_at so it surfaces again
+        resolved_at = NULL
+  RETURNING id INTO v_group_id;
 
   RETURN v_group_id;
 END;

@@ -2,7 +2,7 @@
 INSERT INTO system_config (key, value, description)
 VALUES (
   'email_sync.max_concurrent_lambdas',
-  '25',
+  '25'::jsonb,
   'Cap on concurrent SQS-driven Lambda invocations. Reflected to the SQS event source mapping ScalingConfig.MaximumConcurrency by apply-sync-concurrency edge function.'
 )
 ON CONFLICT (key) DO NOTHING;

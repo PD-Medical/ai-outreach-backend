@@ -11,8 +11,8 @@ CREATE TABLE IF NOT EXISTS email_import_failure_groups (
   resolved_at TIMESTAMPTZ
 );
 
-CREATE INDEX IF NOT EXISTS idx_failure_groups_signature
-  ON email_import_failure_groups (error_signature);
+-- NOTE: error_signature already has a btree index via the UNIQUE constraint
+-- on the column declaration above; no additional index needed for equality lookups.
 
 ALTER TABLE email_import_errors
   ADD COLUMN IF NOT EXISTS failure_group_id UUID REFERENCES email_import_failure_groups(id);

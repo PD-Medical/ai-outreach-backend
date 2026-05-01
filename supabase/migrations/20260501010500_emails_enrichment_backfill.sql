@@ -8,6 +8,13 @@ SET enrichment_status = 'enriched',
 WHERE enrichment_status = 'pending'
   AND ai_processed_at IS NOT NULL;
 
+-- Old emails (>30 days) are marked 'skipped' rather than 'pending' to avoid
+-- creating a massive enrichment backlog at deploy time. Operators can flip
+-- specific rows back to 'pending' if they want them enriched. The 30-day
+-- window is a deployment cutover heuristic, not a long-term retention policy.
+-- NOTE: this UPDATE runs in a single transaction; on tables with millions of
+-- rows it may hold locks for several minutes. Consider running out-of-band
+-- (psql session) on production-scale data instead of via migration.
 UPDATE emails
 SET enrichment_status = 'skipped'
 WHERE enrichment_status = 'pending'
