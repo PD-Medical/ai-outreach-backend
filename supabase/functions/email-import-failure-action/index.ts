@@ -9,6 +9,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.0";
 import { corsHeaders } from "../_shared/cors.ts";
+import { requireAdmin } from "../_shared/auth.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
@@ -25,6 +26,9 @@ serve(async (req) => {
   if (req.method !== 'POST') {
     return new Response(JSON.stringify({ error: 'POST required' }), { status: 405, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
   }
+  const auth = await requireAdmin(req);
+  if (auth instanceof Response) return auth;
+
   const { action, error_id } = await req.json();
   if (!['retry', 'skip'].includes(action) || !error_id) {
     return new Response(JSON.stringify({ error: 'invalid body' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });

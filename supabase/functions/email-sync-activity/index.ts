@@ -1,5 +1,8 @@
 /**
- * GET /email-sync-activity?mailbox_id=&status=&from=&to=&q=&cursor=&limit=50
+ * /email-sync-activity
+ * Accepts both:
+ *   GET  ?mailbox_id=&status=&from=&to=&q=&cursor=&limit=50
+ *   POST { mailbox_id, status, from, to, q, cursor, limit }
  *
  * Returns a paginated activity log:
  *   { rows: [...v_email_activity rows], next_cursor: string|null, total_estimate: number|null }
@@ -9,20 +12,39 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.0";
 import { corsHeaders } from "../_shared/cors.ts";
+import { requireAuth } from "../_shared/auth.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
 
 serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
+
+  const auth = await requireAuth(req);
+  if (auth instanceof Response) return auth;
+
+  // Read filters from POST body or GET query string. supabase-js v2's
+  // functions.invoke() defaults to POST with a JSON body, so the frontend hook
+  // sends { body: filters }. The GET form is preserved for direct/curl callers.
   const url = new URL(req.url);
-  const mailboxId = url.searchParams.get('mailbox_id');
-  const status = url.searchParams.get('status'); // pending|enriched|failed|rate_limited|skipped|all
-  const from = url.searchParams.get('from');
-  const to = url.searchParams.get('to');
-  const q = url.searchParams.get('q')?.trim() || '';
-  const cursor = url.searchParams.get('cursor');
-  const limit = Math.min(parseInt(url.searchParams.get('limit') ?? '50', 10), 200);
+  // deno-lint-ignore no-explicit-any
+  let body: any = null;
+  if (req.method === 'POST') {
+    try { body = await req.json(); } catch { body = null; }
+  }
+  const get = (k: string): string | null => {
+    const v = body?.[k];
+    if (v !== undefined && v !== null && v !== '') return String(v);
+    return url.searchParams.get(k);
+  };
+
+  const mailboxId = get('mailbox_id');
+  const status = get('status'); // pending|enriched|failed|rate_limited|skipped|all
+  const from = get('from');
+  const to = get('to');
+  const q = (get('q') ?? '').trim();
+  const cursor = get('cursor');
+  const limit = Math.min(parseInt(get('limit') ?? '50', 10), 200);
 
   // deno-lint-ignore no-explicit-any
   const supabase: any = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
