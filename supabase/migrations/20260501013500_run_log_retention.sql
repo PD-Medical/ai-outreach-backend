@@ -1,4 +1,9 @@
 -- 20260501013500_run_log_retention.sql
+-- Make this migration idempotent: cron.schedule() rejects duplicate jobnames,
+-- so unschedule any pre-existing entry before re-creating it.
+SELECT cron.unschedule('email-sync-run-log-retention')
+WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'email-sync-run-log-retention');
+
 SELECT cron.schedule(
   'email-sync-run-log-retention',
   '15 3 * * *',  -- 03:15 UTC daily

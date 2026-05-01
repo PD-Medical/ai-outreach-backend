@@ -1,5 +1,10 @@
 -- 20260501013000_stuck_job_watchdog.sql
 -- Requires pg_cron extension (already enabled per project conventions; verify in dashboard).
+-- Make this migration idempotent: cron.schedule() rejects duplicate jobnames,
+-- so unschedule any pre-existing entry before re-creating it.
+SELECT cron.unschedule('email-import-jobs-watchdog')
+WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'email-import-jobs-watchdog');
+
 SELECT cron.schedule(
   'email-import-jobs-watchdog',
   '*/5 * * * *',
