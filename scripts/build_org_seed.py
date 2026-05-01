@@ -545,26 +545,54 @@ def build_seed(src: Path, out: Path) -> dict:
     p("  organization_type_id   = EXCLUDED.organization_type_id;")
     p("")
 
-    # 5. Domain aliases (parents own their primary domain)
-    p("-- organization_domains: each parent owns its primary domain")
+    # 5. Domain aliases — exactly one row per domain.
+    # ----------------------------------------------------------------
+    # organization_domains has UNIQUE INDEX on lower(domain). Multiple
+    # facility rows often share a parent's domain (e.g. five facilities
+    # all on canberrahealthservices.act.gov.au under the "Canberra Health
+    # Services" parent). Per the new design, only the parent claims the
+    # canonical alias for the domain; child facilities are reachable via
+    # parent_organization_id + the _narrow_to_facility name-similarity
+    # match in the RPC. So we dedupe: parent wins; for unclaimed domains,
+    # the first-encountered facility wins.
+    #
+    # When multiple PARENTS entries point at the same parent name (e.g.
+    # both `farwslhd.health.nsw.gov.au` and `fwlhd.health.nsw.gov.au` map
+    # to "Far West LHD"), the parent owns BOTH aliases — the first one
+    # is `is_primary = true`, the rest are alias-only.
+    p("-- organization_domains: one canonical row per domain")
+    p("-- Parents claim every domain they map to (multiple aliases per")
+    p("-- parent allowed; one is marked is_primary). Standalone facilities")
+    p("-- whose domain isn't parent-claimed claim their own. Sibling")
+    p("-- facilities under a shared parent domain inherit via")
+    p("-- parent_organization_id.")
     p("INSERT INTO public.organization_domains (organization_id, domain, is_primary, source) VALUES")
-    alias_rows = []
-    for pname in seen_parents:
-        # Find the primary domain for this parent: the dict key that maps to it
-        primary_dom = next(d for d, (n, _, _) in PARENTS.items() if n == pname)
-        alias_rows.append(f"  ('{parent_uuid(pname)}', {sql_str(primary_dom)}, true, 'seed')")
+    alias_rows: list[str] = []
+    seen_alias_domains: set[str] = set()
+    seen_primary_orgs: set[str] = set()
+    # Parents first — iterate PARENTS in insertion order so every aliased
+    # domain for a given parent gets a row (was: only one primary domain
+    # per parent, which lost siblings like fwlhd ↔ farwslhd → "Far West LHD")
+    for dom, (pname, _, _) in PARENTS.items():
+        if dom in seen_alias_domains:
+            continue
+        seen_alias_domains.add(dom)
+        pid = parent_uuid(pname)
+        is_primary = pid not in seen_primary_orgs
+        if is_primary:
+            seen_primary_orgs.add(pid)
+        alias_rows.append(
+            f"  ('{pid}', {sql_str(dom)}, {'true' if is_primary else 'false'}, 'seed')"
+        )
+    # Then facilities for any domain not already claimed by a parent
+    for r, _ in facility_rows:
+        dom = r[IDX["domain"]]
+        if dom and dom not in seen_alias_domains:
+            seen_alias_domains.add(dom)
+            alias_rows.append(
+                f"  ('{r[IDX['id']]}', {sql_str(dom)}, true, 'seed')"
+            )
     p(",\n".join(alias_rows))
-    p("ON CONFLICT (organization_id, domain) DO UPDATE SET is_primary = EXCLUDED.is_primary;")
-    p("")
-
-    # 6. Facility orgs each get a domain alias too (so domain-based lookup works)
-    p("-- organization_domains: each facility's own domain")
-    p("INSERT INTO public.organization_domains (organization_id, domain, is_primary, source) VALUES")
-    fac_alias_rows = [
-        f"  ('{r[IDX['id']]}', {sql_str(r[IDX['domain']])}, true, 'seed')"
-        for r, _ in facility_rows if r[IDX["domain"]]
-    ]
-    p(",\n".join(fac_alias_rows))
     p("ON CONFLICT (organization_id, domain) DO UPDATE SET is_primary = EXCLUDED.is_primary;")
     p("")
 
