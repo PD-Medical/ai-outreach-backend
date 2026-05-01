@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS public.email_agent_runs (
     workflow_execution_id    UUID REFERENCES public.workflow_executions(id) ON DELETE SET NULL,
     source_email_id          UUID REFERENCES public.emails(id) ON DELETE SET NULL,
     contact_id               UUID REFERENCES public.contacts(id) ON DELETE SET NULL,
-    from_mailbox_id          UUID NOT NULL,
+    from_mailbox_id          UUID NOT NULL REFERENCES public.mailboxes(id) ON DELETE RESTRICT,
     outcome                  VARCHAR(24) NOT NULL,
     outcome_reasoning        TEXT,
     plan_output              JSONB,
@@ -36,12 +36,12 @@ CREATE TABLE IF NOT EXISTS public.email_agent_runs (
         CHECK (invocation_context IN ('workflow', 'manual', 'redraft')),
     CONSTRAINT email_agent_runs_outcome_chk
         CHECK (outcome IN ('drafted', 'skipped', 'info_insufficient', 'rejected', 'in_progress')),
-    -- A run with outcome='drafted' must have a draft_id; non-drafted must not.
+    -- Terminal-state invariant: outcome='drafted' iff draft_id IS NOT NULL.
+    -- in_progress is exempt — mid-graph state may briefly hold either combo.
     CONSTRAINT email_agent_runs_draft_id_outcome_chk
         CHECK (
-            (outcome = 'drafted' AND draft_id IS NOT NULL)
-            OR (outcome <> 'drafted' AND draft_id IS NULL)
-            OR outcome = 'in_progress'
+            outcome = 'in_progress'
+            OR (outcome = 'drafted') = (draft_id IS NOT NULL)
         )
 );
 
