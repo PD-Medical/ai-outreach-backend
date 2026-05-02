@@ -68,18 +68,15 @@ Drop and re-create any that show `indisvalid = false`.
 
 ## Other production considerations for this feature
 
-- `app.settings.supabase_url` and `app.settings.service_role_key` GUCs must be
-  set before the `auto-report-failure-groups` cron will function. The cron
-  guard logs a `WARNING` if either is missing rather than failing the SQL.
-  Set with:
-
-  ```sql
-  ALTER DATABASE postgres SET app.settings.supabase_url = 'https://<project-ref>.supabase.co';
-  ALTER DATABASE postgres SET app.settings.service_role_key = '<service-role-key>';
-  ```
+- The auto-report flow is driven from the email-sync Lambda via an
+  EventBridge schedule (`mode: auto_report_failures`, every 15 min) — NOT
+  from pg_cron. The Lambda already has `SUPABASE_SERVICE_ROLE_KEY` in its
+  environment so no Postgres-level GUC is required. The previous
+  `app.settings.supabase_url` / `app.settings.service_role_key` setup is
+  obsolete.
 
 - Supabase secrets that must be set before the corresponding edge functions
-  work in production:
+  work in production (push via `deploy.yml` from GH env secrets):
   - `GITHUB_PAT` (fine-grained PAT with Issues:write on `PD-Medical/ai-outreach-frontend`)
   - `GITHUB_REPO=PD-Medical/ai-outreach-frontend`
   - `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, `ENVIRONMENT`

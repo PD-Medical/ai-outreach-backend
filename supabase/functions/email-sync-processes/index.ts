@@ -68,6 +68,13 @@ const PROCESSES: ProcessSpec[] = [
     process_key: "watchdog",
     schedule_minutes: 5,
   },
+  {
+    id: "auto_report",
+    name: "Auto-report failures",
+    description: "Files GitHub issues for recurring import errors",
+    process_key: "auto_report_failures",
+    schedule_minutes: 15,
+  },
 ];
 
 serve(async (req) => {
