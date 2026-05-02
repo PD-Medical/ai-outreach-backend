@@ -6,11 +6,17 @@
  *
  * Request body:
  * {
- *   mode: 'sync' | 'legacy' | 'retry_errors' | 'retry_missing',
+ *   mode: 'sync' | 'legacy' | 'retry_errors' | 'retry_missing'
+ *       | 'enrich_pending' | 'check_openrouter_status',
  *   mailbox_ids?: string[],
  *   folders?: string[],
- *   batch_limit?: number
+ *   batch_limit?: number,
+ *   error_ids?: string[],
+ *   force?: boolean
  * }
+ *
+ * The Lambda dispatcher accepts all listed modes (added enrich_pending and
+ * check_openrouter_status in the email-sync-job-management feature).
  */
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
@@ -19,10 +25,18 @@ import { corsHeaders } from "../_shared/cors.ts";
 import { requireAuth } from "../_shared/auth.ts";
 
 interface SyncRequest {
-  mode: 'sync' | 'legacy' | 'retry_errors' | 'retry_missing';
+  mode:
+    | 'sync'
+    | 'legacy'
+    | 'retry_errors'
+    | 'retry_missing'
+    | 'enrich_pending'
+    | 'check_openrouter_status';
   mailbox_ids?: string[];
   folders?: string[];
   batch_limit?: number;
+  error_ids?: string[];
+  force?: boolean;
 }
 
 serve(async (req) => {
@@ -85,7 +99,7 @@ serve(async (req) => {
   } catch (error) {
     console.error('Error in email-sync-trigger:', error);
     return new Response(
-      JSON.stringify({ error: error.message }),
+      JSON.stringify({ error: error instanceof Error ? error.message : String(error) }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }

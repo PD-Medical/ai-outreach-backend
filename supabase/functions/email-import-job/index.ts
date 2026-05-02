@@ -117,6 +117,9 @@ async function handleStart(
   }
 
   // Create job record
+  // Default for bulk legacy imports: skip inline enrichment so the import
+  // completes fast; the enrich_pending cron drains the backlog out-of-band.
+  // Caller can opt back in by explicitly passing skip_enrichment: false.
   const { data: job, error: jobError } = await supabase
     .from("email_import_jobs")
     .insert({
@@ -124,6 +127,7 @@ async function handleStart(
       config: {
         folders: ["INBOX", "INBOX.Sent"],
         skip_existing: true,
+        skip_enrichment: true,
         ...importConfig,
       },
       status: "pending",
