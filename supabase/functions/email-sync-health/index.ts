@@ -115,7 +115,9 @@ serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
   }
-  if (req.method !== "GET") {
+  // Accept GET (legacy) or POST (default for supabase.functions.invoke). The
+  // endpoint is read-only — no body is required for either verb.
+  if (req.method !== "GET" && req.method !== "POST") {
     return new Response(
       JSON.stringify({ error: "Method not allowed" }),
       {
