@@ -1,4 +1,4 @@
--- 20260501013000_stuck_job_watchdog.sql
+-- 20260502130600_stuck_job_watchdog.sql
 -- Requires pg_cron extension (already enabled per project conventions; verify in dashboard).
 -- Make this migration idempotent: cron.schedule() rejects duplicate jobnames,
 -- so unschedule any pre-existing entry before re-creating it.

@@ -1,4 +1,4 @@
--- 20260501011000_email_sync_run_log.sql
+-- 20260502130200_email_sync_run_log.sql
 CREATE TABLE IF NOT EXISTS email_sync_run_log (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   process TEXT NOT NULL CHECK (process IN ('sync', 'retry_errors', 'enrich_pending', 'watchdog', 'legacy', 'auto_report_failures')),

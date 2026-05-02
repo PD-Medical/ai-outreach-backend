@@ -1,4 +1,4 @@
--- 20260501013500_run_log_retention.sql
+-- 20260502130700_run_log_retention.sql
 -- Make this migration idempotent: cron.schedule() rejects duplicate jobnames,
 -- so unschedule any pre-existing entry before re-creating it.
 SELECT cron.unschedule('email-sync-run-log-retention')

@@ -1,4 +1,4 @@
--- 20260501010500_emails_enrichment_backfill.sql
+-- 20260502130100_emails_enrichment_backfill.sql
 -- Backfill: emails with non-null ai_processed_at are 'enriched';
 -- old ones (>30 days) without are 'skipped'; the rest stay 'pending' so the
 -- enrich_pending cron can drain them at a sustainable rate.

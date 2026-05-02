@@ -1,4 +1,4 @@
--- 20260501012000_email_import_errors_class.sql
+-- 20260502130400_email_import_errors_class.sql
 ALTER TABLE email_import_errors
   ADD COLUMN IF NOT EXISTS error_class TEXT
     CHECK (error_class IN ('transient', 'persistent', 'unknown'))

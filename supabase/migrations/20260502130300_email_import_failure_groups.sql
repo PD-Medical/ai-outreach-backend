@@ -1,4 +1,4 @@
--- 20260501011500_email_import_failure_groups.sql
+-- 20260502130300_email_import_failure_groups.sql
 CREATE TABLE IF NOT EXISTS email_import_failure_groups (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   error_pattern TEXT NOT NULL,

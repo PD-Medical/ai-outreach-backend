@@ -1,4 +1,4 @@
--- 20260501014000_v_email_activity.sql
+-- 20260502130800_v_email_activity.sql
 -- Joined view used by the Activity log in the UI.
 -- Adjust column selection if your `emails` table has different fields.
 CREATE OR REPLACE VIEW v_email_activity

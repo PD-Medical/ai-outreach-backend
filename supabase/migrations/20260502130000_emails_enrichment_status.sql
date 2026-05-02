@@ -1,4 +1,4 @@
--- 20260501010000_emails_enrichment_status.sql
+-- 20260502130000_emails_enrichment_status.sql
 ALTER TABLE emails
   ADD COLUMN IF NOT EXISTS enrichment_status TEXT
     CHECK (enrichment_status IN (

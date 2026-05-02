@@ -14,12 +14,12 @@ for the duration of the build.
 
 | Index | Table | Migration |
 |-------|-------|-----------|
-| `idx_emails_enrichment_pending` | `emails` | `20260501010000_emails_enrichment_status.sql` |
-| `idx_emails_mailbox_status` | `emails` | `20260501010000_emails_enrichment_status.sql` |
-| `idx_emails_created_at_desc` | `emails` | `20260501010000_emails_enrichment_status.sql` |
-| `idx_email_import_errors_class` | `email_import_errors` | `20260501012000_email_import_errors_class.sql` |
-| `idx_email_import_errors_message_id` | `email_import_errors` | `20260501012000_email_import_errors_class.sql` |
-| `idx_email_import_errors_group` | `email_import_errors` | `20260501011500_email_import_failure_groups.sql` |
+| `idx_emails_enrichment_pending` | `emails` | `20260502130000_emails_enrichment_status.sql` |
+| `idx_emails_mailbox_status` | `emails` | `20260502130000_emails_enrichment_status.sql` |
+| `idx_emails_created_at_desc` | `emails` | `20260502130000_emails_enrichment_status.sql` |
+| `idx_email_import_errors_class` | `email_import_errors` | `20260502130400_email_import_errors_class.sql` |
+| `idx_email_import_errors_message_id` | `email_import_errors` | `20260502130400_email_import_errors_class.sql` |
+| `idx_email_import_errors_group` | `email_import_errors` | `20260502130300_email_import_failure_groups.sql` |
 
 ## Recommended production deploy procedure
 
