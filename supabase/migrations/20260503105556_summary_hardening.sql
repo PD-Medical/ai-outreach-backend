@@ -43,24 +43,41 @@ AS $$
 DECLARE
   v_prior integer;
 BEGIN
-  UPDATE public.conversations
-  SET email_count_at_last_summary = p_email_count - 1
-  WHERE id = p_conversation_id
-    AND COALESCE(email_count_at_last_summary, 0) < p_email_count - 1
-  RETURNING COALESCE(email_count_at_last_summary, 0) INTO v_prior;
+  -- Lock the row first, then conditionally update. Concurrent workers wait
+  -- on the lock, see the updated marker, and bail. The marker is
+  -- p_email_count (not p_email_count - 1) so it works for single-email
+  -- conversations where p_email_count - 1 = 0 collides with the initial
+  -- never-claimed state.
+  --
+  -- prior_count is the BEFORE value — used by the caller to restore the
+  -- marker if persist fails downstream (otherwise SQS redrive would see
+  -- the marker as "already summarized" and DLQ silently).
 
-  IF FOUND THEN
-    -- Won the claim. v_prior is the value AFTER the update (claim marker),
-    -- but enrich_conversation only needs to know it claimed successfully.
-    RETURN QUERY SELECT true, v_prior;
-  ELSE
-    -- Either the row doesn't exist, or another worker already claimed/
-    -- completed at this email_count or higher. Bail.
-    SELECT COALESCE(email_count_at_last_summary, 0) INTO v_prior
-    FROM public.conversations
-    WHERE id = p_conversation_id;
-    RETURN QUERY SELECT false, COALESCE(v_prior, 0);
+  SELECT COALESCE(email_count_at_last_summary, 0)
+  INTO v_prior
+  FROM public.conversations
+  WHERE id = p_conversation_id
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    -- Conversation deleted between the SQS message and now. Treat as a
+    -- legitimate no-op; caller logs and drops.
+    RETURN QUERY SELECT false, 0;
+    RETURN;
   END IF;
+
+  IF v_prior >= p_email_count THEN
+    -- Already summarized at this count or higher (cache hit, or another
+    -- worker won the claim and finished before we got the lock).
+    RETURN QUERY SELECT false, v_prior;
+    RETURN;
+  END IF;
+
+  UPDATE public.conversations
+  SET email_count_at_last_summary = p_email_count
+  WHERE id = p_conversation_id;
+
+  RETURN QUERY SELECT true, v_prior;
 END;
 $$;
 
