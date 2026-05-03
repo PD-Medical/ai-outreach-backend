@@ -16,6 +16,18 @@
 -- email in the same conversation. Capped at 1.0 (an incoming can be replied to
 -- multiple times). Returns 0.0 when there are no incoming emails.
 --
+-- Chronological comparison uses COALESCE(sent_at, received_at). IMAP-imported
+-- emails set sent_at = received_at, so this is a no-op for that path. For
+-- emails created via send paths (SES, Mailchimp), sent_at is the actual send
+-- time while received_at is the IMAP-fetch time of the Sent-folder copy — the
+-- COALESCE makes the comparison correct in both cases.
+--
+-- IMPORTANT — single-row use only. Six correlated subqueries against `emails`
+-- plus one against `conversations` re-execute per row. Frontend hooks must
+-- always include WHERE contact_id = $1. If you need a multi-contact rollup,
+-- rewrite as a CTE/grouped scan first — do NOT SELECT * FROM the view in a
+-- list context.
+--
 -- Feature flag ui.contact_detail_v2: kill-switch for the new modal. The frontend
 -- reads this via useSystemConfig and falls back to the legacy ContactDetailDialog
 -- when false. Defaulting to true on dev — flip to false via system_config UPDATE
@@ -77,24 +89,28 @@ SELECT
     WHERE e.contact_id = c.id
   ) AS last_contact_at,
 
-  -- Reply rate: of incoming emails the contact sent us, fraction whose
-  -- conversation also contains a later outgoing email from us. Caps at 1.0.
-  -- Returns 0.0 when total_received = 0.
+  -- Reply rate: of incoming emails THIS contact sent us, fraction whose
+  -- conversation contains a later outgoing email TO THIS SAME CONTACT.
+  -- Important: filter outgoing on out_e.contact_id = c.id so a reply to a
+  -- different participant in the same thread doesn't count as a reply to
+  -- this contact (real bug observed in dev: a thread with two contacts had
+  -- one's incoming counted as replied because the other got an outgoing).
+  -- Returns 0.0 when total_received = 0. Mathematically bounded by 1.0.
   (
     SELECT
       CASE
         WHEN count(DISTINCT inc.id) = 0 THEN 0::numeric
-        ELSE LEAST(
-          1.0::numeric,
+        ELSE
           count(DISTINCT inc.id) FILTER (
             WHERE EXISTS (
               SELECT 1 FROM public.emails out_e
               WHERE out_e.conversation_id = inc.conversation_id
-                AND out_e.direction = 'outgoing'
-                AND out_e.received_at > inc.received_at
+                AND out_e.contact_id     = c.id
+                AND out_e.direction      = 'outgoing'
+                AND COALESCE(out_e.sent_at, out_e.received_at)
+                  > COALESCE(inc.sent_at,   inc.received_at)
             )
           )::numeric / count(DISTINCT inc.id)::numeric
-        )
       END
     FROM public.emails inc
     WHERE inc.contact_id = c.id AND inc.direction = 'incoming'
