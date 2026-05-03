@@ -26,18 +26,28 @@
  * through as cached values; null cells when not yet generated (operators can
  * trigger generation by opening the contact's modal).
  *
- * Auth: requireAuth (any logged-in user).
+ * Auth: requireAdmin. Bulk contact export contains PII (email, phone, notes,
+ * AI summaries) — restricting to admin role matches the principle of least
+ * privilege. The user-facing app (Contacts page Export button) is admin-only
+ * for this reason.
  *
  * Why no storage / signed URL: keeping v1 sync + JSON-text means no Storage
  * bucket setup, no retention policy, no async polling UI. CSV files for
- * 5000 contacts × 20 fields ≈ 1MB — fits comfortably in a JSON response.
+ * 1000 contacts × 20 fields ≈ 200KB — fits comfortably in a JSON response.
  * Excel format + async path are deferred until a real volume need shows up.
+ *
+ * UTF-8 BOM prepended so Excel on Windows renders non-ASCII correctly.
+ *
+ * Hard cap: contact_ids capped at 1000 (vs the previous 5000) to stay well
+ * under PostgREST's URL/header length limits when building the IN clause.
+ * Caller-supplied lists exceeding 1000 are rejected with 400 rather than
+ * silently truncated.
  */
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders } from "../_shared/cors.ts";
-import { requireAuth } from "../_shared/auth.ts";
+import { requireAdmin } from "../_shared/auth.ts";
 
 interface ExportRequest {
   format?: "csv";
@@ -137,7 +147,7 @@ serve(async (req) => {
   }
 
   try {
-    const auth = await requireAuth(req);
+    const auth = await requireAdmin(req);
     if (auth instanceof Response) return auth;
 
     let body: ExportRequest;
@@ -172,7 +182,21 @@ serve(async (req) => {
       );
     }
 
-    const limit = Math.min(Math.max(1, body.limit ?? 5000), 10000);
+    const MAX_LIMIT = 5000;
+    const MAX_CONTACT_IDS = 1000;
+    const limit = Math.min(Math.max(1, body.limit ?? 2000), MAX_LIMIT);
+
+    if (Array.isArray(body.contact_ids) && body.contact_ids.length > MAX_CONTACT_IDS) {
+      return new Response(
+        JSON.stringify({
+          success: false,
+          error: `contact_ids exceeds the per-request cap of ${MAX_CONTACT_IDS} (got ${body.contact_ids.length}). Either narrow your filter or omit contact_ids to export all.`,
+          requested: body.contact_ids.length,
+          max: MAX_CONTACT_IDS,
+        }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
 
     const supabase = createClient(
       Deno.env.get("SUPABASE_URL") ?? "",
@@ -186,20 +210,34 @@ serve(async (req) => {
     let query = supabase.from("v_contact_engagement_profile").select(selectCols).limit(limit);
 
     if (Array.isArray(body.contact_ids) && body.contact_ids.length > 0) {
-      // Cap inline IN clause to 5000; if more were requested, the lambda would
-      // need pagination — skip for v1.
-      const ids = body.contact_ids.slice(0, 5000);
-      query = query.in("contact_id", ids);
+      query = query.in("contact_id", body.contact_ids);
     }
 
     // Stable order so re-exports are diffable.
     query = query.order("email", { ascending: true });
 
     const { data, error } = await query;
-    if (error) throw error;
+    if (error) {
+      // Defensive: if the view doesn't exist (PR #74 hasn't shipped), surface
+      // a helpful 503 rather than a generic 500 so operators understand the
+      // dependency.
+      const msg = (error as { message?: string }).message ?? String(error);
+      if (msg.includes("v_contact_engagement_profile") || msg.includes("relation") && msg.includes("does not exist")) {
+        return new Response(
+          JSON.stringify({
+            success: false,
+            error: "Contacts export view not yet deployed. Apply the v_contact_engagement_profile migration first.",
+          }),
+          { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+        );
+      }
+      throw error;
+    }
 
     const rows = (data ?? []) as Record<string, unknown>[];
-    const csv = buildCsv(fields, rows);
+    // Prepend UTF-8 BOM so Excel on Windows renders non-ASCII characters
+    // (accented names, AI-generated narrative summaries) correctly.
+    const csv = "﻿" + buildCsv(fields, rows);
 
     const filename = `contacts-${isoStamp()}.csv`;
 
