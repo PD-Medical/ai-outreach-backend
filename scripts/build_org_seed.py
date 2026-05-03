@@ -555,21 +555,34 @@ def build_seed(src: Path, out: Path) -> dict:
     # parent_organization_id + the _narrow_to_facility name-similarity
     # match in the RPC. So we dedupe: parent wins; for unclaimed domains,
     # the first-encountered facility wins.
+    # When multiple PARENTS keys point at the same parent name (e.g. both
+    # `farwslhd.health.nsw.gov.au` and `fwlhd.health.nsw.gov.au` map to
+    # "Far West LHD"), the parent owns BOTH aliases — one is_primary=true,
+    # the rest are alias-only. Previously only the first-encountered alias
+    # was emitted, leaving the other domain to be claimed by a random
+    # facility on that domain (an inbound-routing bug).
     p("-- organization_domains: one canonical row per domain")
-    p("-- Parents claim their domain; standalone facilities (no parent or")
-    p("-- parent on a different domain) claim their own; sibling facilities")
-    p("-- under a shared parent domain inherit via parent_organization_id.")
+    p("-- Parents claim every domain they map to (one is_primary, the")
+    p("-- rest are alias-only). Standalone facilities whose domain isn't")
+    p("-- parent-claimed claim their own. Sibling facilities under a")
+    p("-- shared parent domain inherit via parent_organization_id.")
     p("INSERT INTO public.organization_domains (organization_id, domain, is_primary, source) VALUES")
     alias_rows: list[str] = []
     seen_alias_domains: set[str] = set()
-    # Parents first — sorted for deterministic output
-    for pname in sorted(seen_parents):
-        primary_dom = next(d for d, (n, _, _) in PARENTS.items() if n == pname)
-        if primary_dom and primary_dom not in seen_alias_domains:
-            seen_alias_domains.add(primary_dom)
-            alias_rows.append(
-                f"  ('{parent_uuid(pname)}', {sql_str(primary_dom)}, true, 'seed')"
-            )
+    seen_primary_orgs: set[str] = set()
+    # Parents first — iterate PARENTS in insertion order so EVERY aliased
+    # domain for a given parent gets a row.
+    for dom, (pname, _, _) in PARENTS.items():
+        if dom in seen_alias_domains:
+            continue
+        seen_alias_domains.add(dom)
+        pid = parent_uuid(pname)
+        is_primary = pid not in seen_primary_orgs
+        if is_primary:
+            seen_primary_orgs.add(pid)
+        alias_rows.append(
+            f"  ('{pid}', {sql_str(dom)}, {'true' if is_primary else 'false'}, 'seed')"
+        )
     # Then facilities for any domain not already claimed by a parent
     for r, _ in facility_rows:
         dom = r[IDX["domain"]]
