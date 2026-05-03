@@ -8,8 +8,8 @@
  *   {
  *     format: 'csv',                  // only csv for v1
  *     fields: string[],               // whitelist below; defaults if omitted
- *     contact_ids?: string[],         // optional filter; if absent, ALL contacts
- *     limit?: number,                 // safety cap (default 5000, max 10000)
+ *     contact_ids?: string[],         // optional filter (max 1000); if absent, ALL contacts
+ *     limit?: number,                 // safety cap (default 2000, max 5000)
  *   }
  *
  * Response shape:
@@ -222,7 +222,15 @@ serve(async (req) => {
       // a helpful 503 rather than a generic 500 so operators understand the
       // dependency.
       const msg = (error as { message?: string }).message ?? String(error);
-      if (msg.includes("v_contact_engagement_profile") || msg.includes("relation") && msg.includes("does not exist")) {
+      // Tight match: require ALL three tokens so a column-mismatch error
+      // (e.g., "column foo does not exist on v_contact_engagement_profile")
+      // doesn't get mislabeled as "view not deployed". Only the genuine
+      // missing-relation error trips this branch.
+      if (
+        msg.includes("relation") &&
+        msg.includes("v_contact_engagement_profile") &&
+        msg.includes("does not exist")
+      ) {
         return new Response(
           JSON.stringify({
             success: false,
