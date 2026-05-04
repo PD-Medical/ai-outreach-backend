@@ -99,7 +99,13 @@ jobs:
             EMAIL_USER="${{ secrets.EMAIL_USER }}" \
             EMAIL_PASSWORD="${{ secrets.EMAIL_PASSWORD }}" \
             MAILCHIMP_API_KEY="${{ secrets.MAILCHIMP_API_KEY }}" \
-            DEFAULT_LLM_MODEL="${{ vars.DEFAULT_LLM_MODEL }}"
+            DEFAULT_LLM_MODEL="${{ vars.DEFAULT_LLM_MODEL }}" \
+            GITHUB_PAT="${{ secrets.AUTO_REPORT_GITHUB_PAT }}" \
+            GITHUB_REPO="${{ vars.AUTO_REPORT_GITHUB_REPO }}" \
+            AWS_ACCESS_KEY_ID="${{ secrets.SYNC_CONCURRENCY_AWS_ACCESS_KEY_ID }}" \
+            AWS_SECRET_ACCESS_KEY="${{ secrets.SYNC_CONCURRENCY_AWS_SECRET_ACCESS_KEY }}" \
+            AWS_REGION="${{ vars.AWS_REGION }}" \
+            ENVIRONMENT="${{ vars.SAM_ENVIRONMENT }}"
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
 

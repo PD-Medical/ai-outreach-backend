@@ -118,54 +118,30 @@ serve(async (req) => {
       );
     }
 
-    // Get contact details if provided
-    let contactDetails = null;
-    if (contact_id) {
-      const { data: contact } = await supabase
-        .from('contacts')
-        .select('id, email, first_name, last_name, job_title, organization_id')
-        .eq('id', contact_id)
-        .single();
-      contactDetails = contact;
-    }
-
-    // Get source email if provided
-    let emailContext = null;
-    if (email_id) {
-      const { data: email } = await supabase
-        .from('emails')
-        .select('id, subject, from_email, from_name, body_plain, body_html, received_at, direction')
-        .eq('id', email_id)
-        .single();
-      emailContext = email;
-    }
-
     // Build Lambda payload
+    //
+    // The new email-agent LangGraph (plan→draft→review) owns context loading
+    // via its `load_context` node — fetches thread, contact, sender_org,
+    // recent drafts/executions, persona, instructions, mailbox itself.
+    // We no longer pre-fetch contact + source_email here; the agent's loader
+    // is the single source of truth and runs uniformly across all 3
+    // invocation paths (workflow / manual / redraft).
+    //
+    // mailbox is_active validation above is preserved as an early gate so we
+    // don't invoke Lambda for inactive mailboxes.
     const lambdaPayload = {
       action: 'draft',
+      // Tells the Lambda graph which entry path / persistence semantics apply.
+      invocation_context: 'manual',
       email_id,
       contact_id,
       from_mailbox_id,
       conversation_id,
       thread_id,
-      params: {
-        ...params,
-        // Include mailbox context for persona/signature
-        mailbox_persona: mailbox.persona_description,
-        mailbox_signature: mailbox.signature_html,
-      },
+      params,
+      // Kept for backward compat with any consumers still reading source.type;
+      // new graph keys off invocation_context above.
       source: source || { type: 'manual', name: 'Emails Page' },
-      // Include pre-fetched context to reduce Lambda lookups
-      context: {
-        mailbox: {
-          id: mailbox.id,
-          email: mailbox.email,
-          name: mailbox.name,
-        },
-        contact: contactDetails,
-        source_email: emailContext,
-      },
-      // User who initiated the request
       created_by_user_id: user.id,
     };
 

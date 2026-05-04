@@ -127,6 +127,123 @@ function buildGetMetricDataPayload(environment: string, periodKey: string) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// AWS query-protocol helper for SQS + CloudWatch DescribeAlarms (form-encoded)
+// ---------------------------------------------------------------------------
+async function signedFormRequest(
+  host: string,
+  service: string,
+  params: Record<string, string>,
+): Promise<{ status: number; text: string }> {
+  const body = Object.entries(params)
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+    .join("&");
+
+  const now = new Date();
+  const amzDate = now.toISOString().replace(/[:\-]|\.\d{3}/g, "");
+  const dateStamp = amzDate.slice(0, 8);
+
+  const canonicalHeaders =
+    `content-type:application/x-www-form-urlencoded\n` +
+    `host:${host}\n` +
+    `x-amz-date:${amzDate}\n`;
+  const signedHeaders = "content-type;host;x-amz-date";
+  const payloadHash = await sha256(body);
+
+  const canonicalRequest = `POST\n/\n\n${canonicalHeaders}\n${signedHeaders}\n${payloadHash}`;
+  const credentialScope = `${dateStamp}/${AWS_REGION}/${service}/aws4_request`;
+  const stringToSign =
+    `AWS4-HMAC-SHA256\n${amzDate}\n${credentialScope}\n${await sha256(canonicalRequest)}`;
+
+  const signingKey = await getSignatureKey(AWS_SECRET_ACCESS_KEY, dateStamp, AWS_REGION, service);
+  const signatureBytes = await hmacSha256(signingKey, stringToSign);
+  const signature = Array.from(new Uint8Array(signatureBytes))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+
+  const authorization =
+    `AWS4-HMAC-SHA256 Credential=${AWS_ACCESS_KEY_ID}/${credentialScope}, ` +
+    `SignedHeaders=${signedHeaders}, Signature=${signature}`;
+
+  const resp = await fetch(`https://${host}/`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      "X-Amz-Date": amzDate,
+      "Authorization": authorization,
+      "Accept": "application/json",
+    },
+    body,
+  });
+  return { status: resp.status, text: await resp.text() };
+}
+
+// Get queue URL + attributes for a single queue, returning a small attribute map.
+async function getQueueAttrs(queueName: string): Promise<Record<string, string>> {
+  const sqsHost = `sqs.${AWS_REGION}.amazonaws.com`;
+  const urlResp = await signedFormRequest(sqsHost, "sqs", {
+    Action: "GetQueueUrl",
+    QueueName: queueName,
+    Version: "2012-11-05",
+  });
+  if (urlResp.status >= 300) {
+    throw new Error(`GetQueueUrl ${queueName} ${urlResp.status}: ${urlResp.text}`);
+  }
+  // Parse XML or JSON for QueueUrl. AWS query API returns XML by default.
+  const queueUrlMatch = urlResp.text.match(/<QueueUrl>([^<]+)<\/QueueUrl>/);
+  const queueUrl = queueUrlMatch?.[1];
+  if (!queueUrl) {
+    throw new Error(`Could not parse QueueUrl for ${queueName}: ${urlResp.text.slice(0, 200)}`);
+  }
+
+  const attrsResp = await signedFormRequest(sqsHost, "sqs", {
+    Action: "GetQueueAttributes",
+    QueueUrl: queueUrl,
+    "AttributeName.1": "ApproximateNumberOfMessagesVisible",
+    "AttributeName.2": "ApproximateAgeOfOldestMessage",
+    Version: "2012-11-05",
+  });
+  if (attrsResp.status >= 300) {
+    throw new Error(`GetQueueAttributes ${queueName} ${attrsResp.status}: ${attrsResp.text}`);
+  }
+
+  // Parse repeated <Attribute><Name/><Value/></Attribute> entries.
+  const out: Record<string, string> = {};
+  const re = /<Attribute>\s*<Name>([^<]+)<\/Name>\s*<Value>([^<]+)<\/Value>\s*<\/Attribute>/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(attrsResp.text)) !== null) {
+    out[m[1]] = m[2];
+  }
+  return out;
+}
+
+async function describeAlarms(alarmNames: string[]): Promise<Array<{ name: string; state: string; reason: string }>> {
+  const host = `monitoring.${AWS_REGION}.amazonaws.com`;
+  const params: Record<string, string> = {
+    Action: "DescribeAlarms",
+    Version: "2010-08-01",
+  };
+  alarmNames.forEach((n, i) => {
+    params[`AlarmNames.member.${i + 1}`] = n;
+  });
+  const resp = await signedFormRequest(host, "monitoring", params);
+  if (resp.status >= 300) {
+    throw new Error(`DescribeAlarms ${resp.status}: ${resp.text}`);
+  }
+  // Parse <MetricAlarms><member>...</member>...</MetricAlarms>
+  const out: Array<{ name: string; state: string; reason: string }> = [];
+  const memberRe = /<member>([\s\S]*?)<\/member>/g;
+  let m: RegExpExecArray | null;
+  while ((m = memberRe.exec(resp.text)) !== null) {
+    const block = m[1];
+    const name = block.match(/<AlarmName>([^<]+)<\/AlarmName>/)?.[1] ?? "";
+    const state = block.match(/<StateValue>([^<]+)<\/StateValue>/)?.[1] ?? "";
+    const reason = block.match(/<StateReason>([^<]*)<\/StateReason>/)?.[1] ?? "";
+    if (name) out.push({ name, state, reason });
+  }
+  return out;
+}
+
 function parseMetricDataResults(results: any[], environment: string) {
   const functionMap: Record<string, any> = {};
 
@@ -215,9 +332,17 @@ serve(async (req) => {
   const VALID_ENVIRONMENTS = ["production", "staging", "dev"];
 
   try {
-    const body = await req.json();
-    const period = body.period || "24h";
-    const environment = body.environment || "production";
+    // Read body (POST JSON) AND query params; either may carry `include`.
+    const url = new URL(req.url);
+    let body: any = {};
+    try { body = await req.json(); } catch (_e) { /* body optional */ }
+    const period = body.period || url.searchParams.get("period") || "24h";
+    const environment = body.environment || url.searchParams.get("environment") || "production";
+    const includeRaw = (body.include ?? url.searchParams.get("include") ?? "") as string;
+    const includes = String(includeRaw)
+      .split(",")
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean);
 
     if (!PERIOD_CONFIG[period]) {
       return new Response(
@@ -294,15 +419,46 @@ serve(async (req) => {
       throttles: functions.reduce((s: number, f: any) => s + f.throttles, 0),
     };
 
+    const result: Record<string, any> = {
+      success: true,
+      period,
+      environment,
+      totals,
+      functions,
+      fetchedAt: new Date().toISOString(),
+    };
+
+    // Optional: include SQS queue health for the email-import batch queues.
+    if (includes.includes("queue")) {
+      try {
+        const mainName = `email-import-batches-${environment}.fifo`;
+        const dlqName = `email-import-batches-dlq-${environment}.fifo`;
+        const [main, dlq] = await Promise.all([
+          getQueueAttrs(mainName).catch((e) => ({ _error: (e as Error).message })),
+          getQueueAttrs(dlqName).catch((e) => ({ _error: (e as Error).message })),
+        ]);
+        result.queue = { main, dlq };
+      } catch (e) {
+        result.queue_error = (e as Error).message;
+      }
+    }
+
+    // Optional: include CloudWatch alarm states for the email-sync feature.
+    if (includes.includes("alarms")) {
+      try {
+        const names = [
+          `email-import-dlq-not-empty-${environment}`,
+          `email-import-queue-backup-${environment}`,
+          `email-sync-cron-stalled-${environment}`,
+        ];
+        result.alarms = await describeAlarms(names);
+      } catch (e) {
+        result.alarms_error = (e as Error).message;
+      }
+    }
+
     return new Response(
-      JSON.stringify({
-        success: true,
-        period,
-        environment,
-        totals,
-        functions,
-        fetchedAt: new Date().toISOString(),
-      }),
+      JSON.stringify(result),
       { headers: { "Content-Type": "application/json", ...corsHeaders } }
     );
 

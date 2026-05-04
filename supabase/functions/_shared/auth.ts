@@ -26,6 +26,12 @@ export async function requireAuth(
 
   const token = authHeader.replace("Bearer ", "");
 
+  // Service-role bypass: pg_cron + internal callers send the service-role JWT.
+  // Treat these as a privileged synthetic principal.
+  if (SERVICE_ROLE_KEY && token === SERVICE_ROLE_KEY) {
+    return { user: { id: "service-role", role: "service_role", is_service_role: true } };
+  }
+
   const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
     auth: { autoRefreshToken: false, persistSession: false },
   });
@@ -59,6 +65,9 @@ export async function requireAdmin(
   if (auth instanceof Response) return auth;
 
   const { user } = auth;
+
+  // Service-role caller (pg_cron, internal jobs) is implicitly privileged.
+  if (user?.is_service_role) return { user };
 
   const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
     auth: { autoRefreshToken: false, persistSession: false },
