@@ -65,10 +65,48 @@ COMMENT ON TABLE public.organizations IS
   'for personal-mail contacts that have no business org. The sentinel is '
   'never renamed (source=seeded, locked by K.2 guard + frontend F2/F3).';
 
--- Smoke test: exactly one sentinel exists with the expected shape
+-- Defence in depth: a BEFORE DELETE trigger blocks DELETE on the sentinel
+-- row regardless of the caller (operator UI, ad-hoc psql, future migrations).
+-- The frontend hides the delete button (Train L F3), but the backend should
+-- not assume the frontend is the only path. If the sentinel disappears, all
+-- contacts bucketed under it (personal-mail addresses + pending enrichment)
+-- silently re-orphan and vanish from the contacts list.
+CREATE OR REPLACE FUNCTION public.prevent_unknown_sentinel_delete()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF OLD.id = 'ffffffff-ffff-4fff-8fff-ffffffffffff'::uuid
+     OR COALESCE((OLD.custom_fields->>'is_unknown_sentinel')::boolean, false) = true THEN
+    RAISE EXCEPTION
+      'Cannot delete the Unknown sentinel organisation (%, %). '
+      'Re-assign contacts to a real organisation instead. '
+      'If this row really must go, drop the trigger first.',
+      OLD.id, OLD.name;
+  END IF;
+  RETURN OLD;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_prevent_unknown_sentinel_delete ON public.organizations;
+CREATE TRIGGER trg_prevent_unknown_sentinel_delete
+  BEFORE DELETE ON public.organizations
+  FOR EACH ROW
+  EXECUTE FUNCTION public.prevent_unknown_sentinel_delete();
+
+COMMENT ON TRIGGER trg_prevent_unknown_sentinel_delete ON public.organizations IS
+  'Train L: protects the Unknown sentinel organisation from deletion. The '
+  'frontend hides the delete button (Train L F3) but this guard ensures '
+  'no other code path can remove the row. If the sentinel were deleted, '
+  'all bucketed contacts would re-orphan to NULL and disappear from the '
+  'contacts UI.';
+
+-- Smoke test: exactly one sentinel exists with the expected shape, AND the
+-- trigger actually blocks deletion.
 DO $smoke$
 DECLARE
   v_count int;
+  v_blocked boolean := false;
 BEGIN
   SELECT count(*) INTO v_count
   FROM public.organizations
@@ -79,6 +117,18 @@ BEGIN
 
   IF v_count <> 1 THEN
     RAISE EXCEPTION 'Train L smoke test failed: Unknown sentinel row missing or malformed (count=%)', v_count;
+  END IF;
+
+  -- Verify the deletion guard actually fires.
+  BEGIN
+    DELETE FROM public.organizations
+    WHERE id = 'ffffffff-ffff-4fff-8fff-ffffffffffff'::uuid;
+  EXCEPTION
+    WHEN raise_exception THEN
+      v_blocked := true;
+  END;
+  IF NOT v_blocked THEN
+    RAISE EXCEPTION 'Train L smoke test failed: sentinel deletion was NOT blocked by trigger';
   END IF;
 END;
 $smoke$;
