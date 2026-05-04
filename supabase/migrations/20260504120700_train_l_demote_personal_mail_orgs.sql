@@ -176,4 +176,32 @@ BEGIN
 END;
 $smoke$;
 
+-- End-to-end behaviour check: now that the personal-mail orgs are gone
+-- and the patched upsert is in place (M-patch ran in the previous
+-- migration), a fresh gmail.com email should route to the Unknown
+-- sentinel. This is the meaningful Train L invariant — we test it here
+-- because here is the first point in the migration sequence where the
+-- full state holds. Cleans up the synthetic contact afterwards.
+DO $behaviour$
+DECLARE
+  v_result record;
+  v_test_email text := '__train_l_e2e_' || extract(epoch from now())::bigint || '@gmail.com';
+BEGIN
+  SELECT * INTO v_result
+  FROM public.upsert_contact_with_org_v2(
+    p_email := v_test_email,
+    p_first_name := 'Train L',
+    p_last_name := 'E2E'
+  );
+
+  IF v_result.organization_id IS DISTINCT FROM 'ffffffff-ffff-4fff-8fff-ffffffffffff'::uuid THEN
+    RAISE EXCEPTION
+      'Train L E2E behaviour check failed: gmail.com upsert did not route to Unknown sentinel (got %)',
+      v_result.organization_id;
+  END IF;
+
+  DELETE FROM public.contacts WHERE id = v_result.contact_id;
+END;
+$behaviour$;
+
 COMMIT;

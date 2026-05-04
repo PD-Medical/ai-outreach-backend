@@ -269,27 +269,27 @@ COMMENT ON FUNCTION public.upsert_contact_with_org_v2(text,text,text,text,text,t
   'in any org alias still return NULL — async enrichment '
   '(_get_or_create_org_from_email_content) creates an enriched org.';
 
--- Smoke test: function still has the expected signature and a personal-mail
--- domain now resolves to the sentinel.
+-- Smoke test: schema-level only. Verify exactly one upsert_contact_with_org_v2
+-- overload exists with the expected return shape. The runtime behaviour
+-- check ("gmail.com → Unknown sentinel") cannot live here — it depends on
+-- M2 (the next migration) having removed the legacy Gmail/Hotmail seed
+-- rows. Cross-migration behavioural invariants belong in the migration
+-- that establishes them, so the gmail-to-sentinel verification lives at
+-- the end of 20260504120700_train_l_demote_personal_mail_orgs.sql instead.
 DO $smoke$
 DECLARE
-  v_result record;
-  v_test_email text := '__train_l_smoke_test_' || extract(epoch from now())::bigint || '@gmail.com';
+  v_overload_count int;
 BEGIN
-  SELECT * INTO v_result
-  FROM public.upsert_contact_with_org_v2(
-    p_email := v_test_email,
-    p_first_name := 'Smoke',
-    p_last_name := 'Test'
-  );
-
-  IF v_result.organization_id IS DISTINCT FROM 'ffffffff-ffff-4fff-8fff-ffffffffffff'::uuid THEN
-    RAISE EXCEPTION 'Train L smoke test failed: gmail.com email did not route to Unknown sentinel (got %)',
-      v_result.organization_id;
+  SELECT count(*) INTO v_overload_count
+  FROM pg_proc p
+  JOIN pg_namespace n ON p.pronamespace = n.oid
+  WHERE p.proname = 'upsert_contact_with_org_v2'
+    AND n.nspname = 'public';
+  IF v_overload_count <> 1 THEN
+    RAISE EXCEPTION
+      'Train L M-patch smoke test failed: expected 1 upsert_contact_with_org_v2 overload, found %',
+      v_overload_count;
   END IF;
-
-  -- Cleanup the smoke test contact
-  DELETE FROM public.contacts WHERE id = v_result.contact_id;
 END;
 $smoke$;
 
