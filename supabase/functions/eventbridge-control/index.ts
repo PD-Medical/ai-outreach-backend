@@ -91,9 +91,13 @@ serve(async (req) => {
       );
     }
 
-    if (!rule_name.startsWith("ai-outreach-")) {
+    // Allowlist of rule-name patterns this function is permitted to control.
+    // Keeps the security property (no arbitrary EventBridge rules can be
+    // toggled) while matching the actual SAM-deployed rule names.
+    const ALLOWED_RULE_PATTERN = /^(email-sync-schedule|email-retry-errors-schedule|email-enrich-pending-schedule|email-auto-report-failures-schedule)-(development|staging|production)$/;
+    if (!ALLOWED_RULE_PATTERN.test(rule_name)) {
       return new Response(
-        JSON.stringify({ success: false, error: "Invalid rule_name: must start with 'ai-outreach-'" }),
+        JSON.stringify({ success: false, error: `Invalid rule_name: ${rule_name} is not in the allowlist` }),
         { status: 400, headers: { "Content-Type": "application/json", ...corsHeaders } }
       );
     }
