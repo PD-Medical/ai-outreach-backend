@@ -271,10 +271,20 @@ COMMENT ON FUNCTION public.upsert_contact_with_org_v2(text,text,text,text,text,t
 
 -- Smoke test: function still has the expected signature and a personal-mail
 -- domain now resolves to the sentinel.
+--
+-- Uses aol.com instead of gmail.com because gmail.com (and a handful of
+-- other consumer/ISP domains) is in the seed as a legacy customer org.
+-- That row gets removed by M2 (the next migration), but the sequence is
+--   M-rpc → M-sentinel → M-patch → M2-demote
+-- so at M-patch smoke-test time, gmail.com still resolves to the legacy
+-- org id and the personal-mail-to-sentinel branch (which only fires when
+-- _resolve_org_by_domain returns NULL) doesn't trigger. aol.com is in
+-- PERSONAL_MAIL_DOMAINS but was never in the seed, so it correctly
+-- exercises the new branch regardless of M2's ordering.
 DO $smoke$
 DECLARE
   v_result record;
-  v_test_email text := '__train_l_smoke_test_' || extract(epoch from now())::bigint || '@gmail.com';
+  v_test_email text := '__train_l_smoke_test_' || extract(epoch from now())::bigint || '@aol.com';
 BEGIN
   SELECT * INTO v_result
   FROM public.upsert_contact_with_org_v2(
@@ -284,7 +294,7 @@ BEGIN
   );
 
   IF v_result.organization_id IS DISTINCT FROM 'ffffffff-ffff-4fff-8fff-ffffffffffff'::uuid THEN
-    RAISE EXCEPTION 'Train L smoke test failed: gmail.com email did not route to Unknown sentinel (got %)',
+    RAISE EXCEPTION 'Train L smoke test failed: aol.com email did not route to Unknown sentinel (got %)',
       v_result.organization_id;
   END IF;
 
