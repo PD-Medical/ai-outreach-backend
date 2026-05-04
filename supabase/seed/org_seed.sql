@@ -4809,6 +4809,16 @@ INSERT INTO public.organization_domains (organization_id, domain, is_primary, so
   ('44dfe09b-d086-4faf-bcbc-63efeaff48ca', 'tmcj.co.jp', true, 'seed')
 ON CONFLICT (organization_id, domain) DO UPDATE SET is_primary = EXCLUDED.is_primary;
 
+-- ============================================================================
+-- Train K.2: Mark every org inserted (or updated) by this seed as `seeded`
+-- so the lambda enrichment guard skips name updates for these rows.
+-- New `source` column defaults to 'auto' (per migration
+-- 20260504091349_organizations_source_column.sql); this UPDATE upgrades
+-- only those still on the default. Manual (operator-created) and
+-- enriched (LLM-created) rows keep their existing source.
+-- ============================================================================
+UPDATE public.organizations SET source = 'seeded' WHERE source = 'auto';
+
 COMMIT;
 
 -- =============================================================
