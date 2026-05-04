@@ -4812,12 +4812,22 @@ ON CONFLICT (organization_id, domain) DO UPDATE SET is_primary = EXCLUDED.is_pri
 -- ============================================================================
 -- Train K.2: Mark every org inserted (or updated) by this seed as `seeded`
 -- so the lambda enrichment guard skips name updates for these rows.
--- New `source` column defaults to 'auto' (per migration
--- 20260504091349_organizations_source_column.sql); this UPDATE upgrades
--- only those still on the default. Manual (operator-created) and
--- enriched (LLM-created) rows keep their existing source.
+--
+-- WHERE clause covers two cases:
+--   - source = 'auto': default for new rows (post-K.2 migration default
+--     was 'seeded' but kept this branch for environments that ran an
+--     older variant).
+--   - source = 'enriched': rows that were renamed by the LLM after seed
+--     and need their source restored along with the corrected name from
+--     the INSERT block above (ON CONFLICT (id) DO UPDATE SET name=...).
+--     Without this branch, an enriched row would survive a re-seed with
+--     the canonical name but stale 'enriched' source — i.e., still
+--     unprotected from the next round of LLM extraction.
+--
+-- Manual (operator-created) rows keep their existing source so the UI
+-- can lock those out of LLM updates regardless of the seed.
 -- ============================================================================
-UPDATE public.organizations SET source = 'seeded' WHERE source = 'auto';
+UPDATE public.organizations SET source = 'seeded' WHERE source IN ('auto', 'enriched');
 
 COMMIT;
 

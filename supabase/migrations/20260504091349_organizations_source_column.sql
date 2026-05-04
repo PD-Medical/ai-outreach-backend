@@ -24,20 +24,35 @@
 
 BEGIN;
 
+-- Add column with safe default. Pre-existing rows are presumed `seeded`
+-- (the only way they got into the org table is via the seed file or via
+-- operator action — both should be treated as protected). New rows
+-- written by the import path use `auto`, by the LLM path use `enriched`,
+-- by operator UI use `manual`. The CHECK constraint locks the contract.
 ALTER TABLE public.organizations
-  ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'auto';
+  ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'seeded';
+
+ALTER TABLE public.organizations
+  DROP CONSTRAINT IF EXISTS organizations_source_check;
+ALTER TABLE public.organizations
+  ADD CONSTRAINT organizations_source_check
+  CHECK (source IN ('seeded', 'manual', 'auto', 'enriched'));
 
 COMMENT ON COLUMN public.organizations.source IS
   'Origin of this row. Values: seeded | manual | auto | enriched. '
   'Lambda enrichment skips name update when source IN (seeded, manual) '
-  'so curated org names are not overwritten by LLM signature extraction.';
+  'so curated org names are not overwritten by LLM signature extraction. '
+  'Default seeded — pre-existing rows are protected by default; new '
+  'auto/enriched rows must opt in by setting source explicitly.';
 
 -- Index for the guard query (small column, frequent read during enrichment)
 CREATE INDEX IF NOT EXISTS idx_organizations_source
   ON public.organizations (source);
 
--- Smoke test: column exists and is non-null
+-- Smoke tests: column + constraint
 DO $smoke$
+DECLARE
+  v_constraint_exists boolean;
 BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.columns
@@ -47,6 +62,15 @@ BEGIN
       AND is_nullable = 'NO'
   ) THEN
     RAISE EXCEPTION 'K.2 smoke test failed: organizations.source column missing or nullable';
+  END IF;
+
+  SELECT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'organizations_source_check'
+      AND conrelid = 'public.organizations'::regclass
+  ) INTO v_constraint_exists;
+  IF NOT v_constraint_exists THEN
+    RAISE EXCEPTION 'K.2 smoke test failed: organizations_source_check constraint missing';
   END IF;
 END;
 $smoke$;
