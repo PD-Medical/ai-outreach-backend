@@ -1,0 +1,155 @@
+-- ============================================================================
+-- Train L — create_enriched_org_for_domain RPC
+-- ============================================================================
+-- Race-safe helper for the lambda enrichment pipeline. Given a domain and a
+-- proposed display name, returns the organization_id that owns that domain —
+-- creating an `enriched` org and the matching organization_domains alias row
+-- if neither exists yet, or adopting the existing winner if a concurrent
+-- session already did so.
+--
+-- WHY:
+--   Train I removed inline org creation from upsert_contact_with_org_v2.
+--   Train L moves it to async enrichment instead. The lambda needs a single
+--   atomic call that handles both the "first time we see this domain" path
+--   and the "two enrichment workers raced on the same fresh domain" path
+--   without leaking org rows.
+--
+-- WHO CALLS THIS:
+--   ai-outreach-lambda functions/email-sync/enrichment_core.py
+--   _get_or_create_org_from_email_content() — invoked when a contact arrives
+--   at enrichment with organization_id IS NULL and the domain is NOT in the
+--   PERSONAL_MAIL_DOMAINS blocklist.
+--
+-- BEHAVIOUR:
+--   1. If organization_domains already has a row for lower(p_domain),
+--      return that row's organization_id immediately. No writes.
+--   2. Otherwise INSERT a new row into organizations with source='enriched'
+--      and the supplied domain. ON CONFLICT (domain) DO UPDATE bumps
+--      updated_at and adopts the existing org_id when racing — never
+--      duplicates the org row.
+--   3. INSERT into organization_domains (org_id, domain). ON CONFLICT
+--      DO NOTHING swallows races on either constraint.
+--   4. Re-SELECT from organization_domains and return whichever org_id
+--      ultimately won. Curated/seeded orgs that pre-own this domain via
+--      organization_domains take precedence — we never rename them.
+--
+--   The K.2 source guard in lambda's update_organization_from_enrichment
+--   continues to protect seeded/manual names. This RPC only writes
+--   source='enriched' on org rows it actually creates.
+-- ============================================================================
+
+BEGIN;
+
+CREATE OR REPLACE FUNCTION public.create_enriched_org_for_domain(
+  p_name   text,
+  p_domain text
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_norm_domain text;
+  v_org_id      uuid;
+  v_fallback    text;
+BEGIN
+  IF p_domain IS NULL OR length(trim(p_domain)) = 0 THEN
+    RAISE EXCEPTION 'create_enriched_org_for_domain: p_domain is required';
+  END IF;
+
+  v_norm_domain := lower(trim(p_domain));
+
+  -- Step 1: fast path — domain already known via the alias table.
+  -- Curated and previously-enriched orgs both surface here.
+  SELECT organization_id INTO v_org_id
+  FROM public.organization_domains
+  WHERE lower(domain) = v_norm_domain
+  LIMIT 1;
+  IF v_org_id IS NOT NULL THEN
+    RETURN v_org_id;
+  END IF;
+
+  -- Step 2: domain not seen yet. Build a name (LLM-supplied or
+  -- domain-stem fallback). Spec L L2 fallback: initcap(domain stem).
+  v_fallback := initcap(split_part(v_norm_domain, '.', 1));
+
+  -- Race-safe org insert. organizations.domain is UNIQUE NOT NULL; if a
+  -- concurrent session beat us here, ON CONFLICT (domain) DO UPDATE adopts
+  -- their id without creating a duplicate row. Note: DO UPDATE only bumps
+  -- updated_at — we never rewrite name (K.2 guard would also block it).
+  INSERT INTO public.organizations (name, domain, status, source, tags, custom_fields)
+  VALUES (
+    COALESCE(NULLIF(trim(p_name), ''), v_fallback),
+    v_norm_domain,
+    'active',
+    'enriched',
+    '[]'::jsonb,
+    '{}'::jsonb
+  )
+  ON CONFLICT (domain) DO UPDATE
+    SET updated_at = now()
+  RETURNING id INTO v_org_id;
+
+  -- Step 3: alias-table mirror. ON CONFLICT DO NOTHING covers two cases:
+  --   (a) PK collision (org_id, domain) on retry of same caller — no-op.
+  --   (b) lower(domain) UNIQUE collision against a different org_id from a
+  --       racing session — we accept their winner and re-SELECT below.
+  INSERT INTO public.organization_domains (organization_id, domain, is_primary, source)
+  VALUES (v_org_id, v_norm_domain, true, 'auto-derived')
+  ON CONFLICT DO NOTHING;
+
+  -- Step 4: re-resolve through the alias table — that's the canonical
+  -- domain → org pointer. If step 3 lost the race, this returns the
+  -- winning session's org_id; our org row from step 2 stays orphaned in
+  -- the rare race window (acceptable: it carries source='enriched' and
+  -- can be merged or cleaned up by a future operator UI). The
+  -- ON CONFLICT (domain) on organizations in step 2 makes orphans
+  -- exceptionally rare anyway.
+  SELECT organization_id INTO v_org_id
+  FROM public.organization_domains
+  WHERE lower(domain) = v_norm_domain
+  LIMIT 1;
+
+  RETURN v_org_id;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.create_enriched_org_for_domain(text, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.create_enriched_org_for_domain(text, text)
+  TO service_role, authenticated;
+
+COMMENT ON FUNCTION public.create_enriched_org_for_domain(text, text) IS
+  'Train L: race-safe lookup-or-create for an org keyed on email domain. '
+  'Returns the existing organization_id if the domain is already in '
+  'organization_domains; otherwise inserts a new organizations row with '
+  'source=enriched and a matching alias row, returning the id. Called '
+  'from the lambda enrichment pipeline (_get_or_create_org_from_email_content).';
+
+-- Smoke test: function exists, executable, returns uuid for a fresh domain
+DO $smoke$
+DECLARE
+  v_test_domain text := '__train_l_smoke_test_domain.invalid';
+  v_first_id    uuid;
+  v_second_id   uuid;
+BEGIN
+  -- First call creates
+  v_first_id := public.create_enriched_org_for_domain('Smoke Test Org', v_test_domain);
+  IF v_first_id IS NULL THEN
+    RAISE EXCEPTION 'Train L smoke test failed: first call returned NULL';
+  END IF;
+
+  -- Second call adopts (idempotent)
+  v_second_id := public.create_enriched_org_for_domain('Smoke Test Org Again', v_test_domain);
+  IF v_second_id IS DISTINCT FROM v_first_id THEN
+    RAISE EXCEPTION 'Train L smoke test failed: second call returned different id (% vs %)',
+      v_first_id, v_second_id;
+  END IF;
+
+  -- Cleanup
+  DELETE FROM public.organization_domains WHERE lower(domain) = v_test_domain;
+  DELETE FROM public.organizations WHERE id = v_first_id;
+END;
+$smoke$;
+
+COMMIT;
