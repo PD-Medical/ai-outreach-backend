@@ -6,15 +6,17 @@
 -- Train L gives those contacts a home: the Unknown sentinel created in the
 -- preceding migration.
 --
--- ONE behavioural change vs. Train I's body:
+-- ONE behavioural change vs. Train K.1's body:
 --   If _resolve_org_by_domain returns NULL AND the domain is in the
 --   hardcoded PERSONAL_MAIL_DOMAINS list, set v_org_id to the Unknown
 --   sentinel UUID. Sync, fast, no LLM. Business domains still leave
 --   v_org_id NULL — async enrichment (lambda L2/L3) handles those.
 --
--- Everything else — role-address rejection, normalisation, facility
--- narrowing, lock-and-upsert, trust-merge, return shape — is preserved
--- verbatim from migration 20260503055937_nullable_contact_org_and_cleanups.
+-- Everything else — role-address rejection (calling _is_role_address per
+-- K.1's rename), normalisation, facility narrowing, lock-and-upsert,
+-- trust-merge, K.1's contacts.organization_id qualifier in the existing-
+-- contact branch, return shape — is preserved verbatim from migration
+-- 20260504071238_upsert_org_ambiguity_and_engagement_claim.sql (K.1).
 --
 -- The personal-mail list is duplicated in two places by design (spec Open
 -- Question #4: "hardcoded constant over config row"):
@@ -84,8 +86,9 @@ BEGIN
     RETURN;
   END IF;
 
-  -- 1b. Reject role addresses
-  IF public.is_role_address(p_email) THEN
+  -- 1b. Reject role addresses (purchase@, info@, accounts@, etc.).
+  -- K.1 renamed is_role_address to _is_role_address (private convention).
+  IF public._is_role_address(p_email) THEN
     RETURN QUERY SELECT NULL::uuid, NULL::uuid, false, true, ARRAY[]::text[];
     RETURN;
   END IF;
@@ -103,7 +106,8 @@ BEGIN
     v_org_id := c_unknown_sentinel;
   END IF;
 
-  -- 5. If org has children, narrow to facility based on hint
+  -- 5. If org has children, narrow to facility based on hint.
+  --    Skip narrowing for the sentinel (it has no facility hierarchy).
   IF v_org_id IS NOT NULL
      AND v_org_id <> c_unknown_sentinel
      AND p_facility_hint IS NOT NULL THEN
@@ -169,7 +173,7 @@ BEGIN
     is_new_contact := true;
     is_role_address := false;
   ELSE
-    -- Existing contact — apply trust-merge (preserved verbatim from Train I)
+    -- Existing contact — apply trust-merge (preserved from K.1 verbatim)
     contact_id      := v_existing.id;
     is_new_contact  := false;
     is_role_address := false;
@@ -226,20 +230,21 @@ BEGIN
       ),
       -- Backfill organization_id only if currently NULL or pointed at a
       -- legacy auto-created placeholder. Don't relink curated assignments.
-      -- Train L: also relink contacts currently on the Unknown sentinel —
-      -- when a real org becomes resolvable for that domain (e.g. operator
-      -- adds an alias), the next sync should move them off the catch-all.
+      -- TRAIN K.1 FIX (#16): qualify ambiguous references as
+      -- `contacts.organization_id` to avoid 42702 against the OUT param.
+      -- Train L: also relink contacts currently on the Unknown sentinel
+      -- when a real org becomes resolvable for that domain.
       organization_id = CASE
-        WHEN organization_id IS NULL AND v_org_id IS NOT NULL THEN v_org_id
+        WHEN contacts.organization_id IS NULL AND v_org_id IS NOT NULL THEN v_org_id
         WHEN v_org_id IS NOT NULL AND EXISTS (
           SELECT 1 FROM public.organizations o
-          WHERE o.id = organization_id
+          WHERE o.id = contacts.organization_id
             AND COALESCE(o.custom_fields->>'auto_created_from_intake','false')::boolean
         ) THEN v_org_id
         WHEN v_org_id IS NOT NULL
              AND v_org_id <> c_unknown_sentinel
-             AND organization_id = c_unknown_sentinel THEN v_org_id
-        ELSE organization_id
+             AND contacts.organization_id = c_unknown_sentinel THEN v_org_id
+        ELSE contacts.organization_id
       END,
       updated_at = v_now
     WHERE id = v_existing.id;
@@ -259,11 +264,10 @@ GRANT EXECUTE ON FUNCTION public.upsert_contact_with_org_v2(text,text,text,text,
   TO service_role, authenticated;
 
 COMMENT ON FUNCTION public.upsert_contact_with_org_v2(text,text,text,text,text,text,text,text,text,text,numeric) IS
-  'Train L: same as Train I (no inline org creation for unknown business '
-  'domains) PLUS personal-mail addresses (gmail.com, hotmail.com, etc.) are '
-  'linked to the Unknown sentinel org instead of returning NULL. Business '
-  'domains not in any org alias still return NULL — async enrichment '
-  '(_get_or_create_org_from_email_content) creates an enriched org for them.';
+  'Train L: same as K.1 body PLUS personal-mail addresses route to the '
+  'Unknown sentinel org instead of returning NULL. Business domains not '
+  'in any org alias still return NULL — async enrichment '
+  '(_get_or_create_org_from_email_content) creates an enriched org.';
 
 -- Smoke test: function still has the expected signature and a personal-mail
 -- domain now resolves to the sentinel.
