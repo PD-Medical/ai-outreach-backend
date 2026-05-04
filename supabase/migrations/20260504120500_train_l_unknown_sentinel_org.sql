@@ -21,9 +21,11 @@
 -- (HospitalEditDialog locks all fields when custom_fields.is_unknown_sentinel
 -- is true — Train L F2/F3 deliverables).
 --
--- organizations.domain is NOT NULL UNIQUE. We give the sentinel a synthetic
--- value `__unknown_sentinel__` that cannot collide with a real DNS name (no
--- real domain begins with an underscore at the label boundary). The sentinel
+-- organizations.domain is NOT NULL (no actual UNIQUE on this DB despite
+-- the consolidated_schema declaration — see the create_enriched_org_for_domain
+-- migration for context). We give the sentinel a synthetic value
+-- `__unknown_sentinel__` that cannot collide with a real DNS name (no real
+-- domain begins with an underscore at the label boundary). The sentinel
 -- has NO row in organization_domains — it's a catch-all, not domain-bound,
 -- so _resolve_org_by_domain never returns it.
 -- ============================================================================
