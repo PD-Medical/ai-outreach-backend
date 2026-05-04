@@ -237,6 +237,34 @@ def normalise_text(s: str | None) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
+# Train L: personal-mail "orgs" filtered out of the seed. They are inboxes,
+# not customers, and the legacy backup conflated them. The lambda's
+# functions/shared/personal_mail_domains.py PERSONAL_MAIL_DOMAINS is the
+# canonical list — keep these two in lock-step manually.
+PERSONAL_MAIL_DOMAINS_FOR_SEED = frozenset([
+    "gmail.com", "googlemail.com",
+    "hotmail.com", "outlook.com", "live.com", "msn.com", "hotmail.com.au",
+    "yahoo.com", "yahoo.com.au", "ymail.com",
+    "icloud.com", "me.com", "mac.com",
+    "aol.com", "protonmail.com", "proton.me",
+    "bigpond.com", "bigpond.net.au", "bigpond.com.au",
+    "optusnet.com.au", "iinet.net.au", "internode.on.net",
+    "tpg.com.au", "dodo.com.au", "exetel.com.au",
+])
+
+
+def is_personal_mail_org(row: list[str]) -> bool:
+    """Train L: skip rows whose domain is a consumer/personal mailbox.
+
+    The legacy CRM dump put gmail.com / hotmail.com etc. into organizations
+    because they appeared as From-domains; they are not customer orgs.
+    Train L re-routes these to the Unknown sentinel at intake/enrichment
+    time, so they do not need to live in the seed.
+    """
+    domain = (row[IDX["domain"]] or "").strip().lower()
+    return domain in PERSONAL_MAIL_DOMAINS_FOR_SEED
+
+
 def fill_score(row: list[str]) -> int:
     """Count non-null fields; used to pick the best dedup survivor."""
     return sum(1 for v in row if not is_null(v))
@@ -389,6 +417,9 @@ def emit_facility_row(r: list[str], parent_org_id: str | None) -> str:
 def build_seed(src: Path, out: Path) -> dict:
     raw = parse_copy_dump(src)
     cleaned = [clean_row(r) for r in raw]
+    # Train L: drop personal-mail "orgs" before dedup so they never appear
+    # in the seeded organizations or organization_domains tables.
+    cleaned = [r for r in cleaned if not is_personal_mail_org(r)]
     deduped = dedup(cleaned)
 
     # Determine parent assignments per facility
