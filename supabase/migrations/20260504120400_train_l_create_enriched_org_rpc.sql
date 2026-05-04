@@ -23,15 +23,19 @@
 -- BEHAVIOUR:
 --   1. If organization_domains already has a row for lower(p_domain),
 --      return that row's organization_id immediately. No writes.
---   2. Otherwise INSERT a new row into organizations with source='enriched'
---      and the supplied domain. ON CONFLICT (domain) DO UPDATE bumps
---      updated_at and adopts the existing org_id when racing — never
---      duplicates the org row.
+--   2. Otherwise INSERT a new row into organizations with source='enriched'.
+--      organizations.domain has NO unique constraint on this DB (despite
+--      the consolidated_schema declaring one — the dev DB diverged and
+--      currently carries 1340+ duplicate-by-lower(domain) rows from the
+--      legacy backup). So we cannot ON CONFLICT on organizations and must
+--      pivot race-safety on organization_domains instead, which DOES have
+--      a UNIQUE INDEX on lower(domain).
 --   3. INSERT into organization_domains (org_id, domain). ON CONFLICT
---      DO NOTHING swallows races on either constraint.
---   4. Re-SELECT from organization_domains and return whichever org_id
---      ultimately won. Curated/seeded orgs that pre-own this domain via
---      organization_domains take precedence — we never rename them.
+--      DO NOTHING swallows the race when another session won.
+--   4. Re-SELECT from organization_domains. The returned organization_id
+--      is the canonical owner of this domain; if we lost the race, it
+--      points at someone else's org and our step-2 row is orphaned —
+--      delete the orphan to keep the table clean.
 --
 --   The K.2 source guard in lambda's update_organization_from_enrichment
 --   continues to protect seeded/manual names. This RPC only writes
@@ -50,9 +54,11 @@ SECURITY DEFINER
 SET search_path = public, pg_temp
 AS $$
 DECLARE
-  v_norm_domain text;
-  v_org_id      uuid;
-  v_fallback    text;
+  v_norm_domain  text;
+  v_existing_id  uuid;
+  v_new_org_id   uuid;
+  v_winning_id   uuid;
+  v_fallback     text;
 BEGIN
   IF p_domain IS NULL OR length(trim(p_domain)) = 0 THEN
     RAISE EXCEPTION 'create_enriched_org_for_domain: p_domain is required';
@@ -62,22 +68,21 @@ BEGIN
 
   -- Step 1: fast path — domain already known via the alias table.
   -- Curated and previously-enriched orgs both surface here.
-  SELECT organization_id INTO v_org_id
+  SELECT organization_id INTO v_existing_id
   FROM public.organization_domains
   WHERE lower(domain) = v_norm_domain
   LIMIT 1;
-  IF v_org_id IS NOT NULL THEN
-    RETURN v_org_id;
+  IF v_existing_id IS NOT NULL THEN
+    RETURN v_existing_id;
   END IF;
 
   -- Step 2: domain not seen yet. Build a name (LLM-supplied or
   -- domain-stem fallback). Spec L L2 fallback: initcap(domain stem).
   v_fallback := initcap(split_part(v_norm_domain, '.', 1));
 
-  -- Race-safe org insert. organizations.domain is UNIQUE NOT NULL; if a
-  -- concurrent session beat us here, ON CONFLICT (domain) DO UPDATE adopts
-  -- their id without creating a duplicate row. Note: DO UPDATE only bumps
-  -- updated_at — we never rewrite name (K.2 guard would also block it).
+  -- Plain INSERT — no ON CONFLICT possible because organizations has no
+  -- UNIQUE constraint on (domain) on this DB (1340+ duplicates from
+  -- legacy backup). Race safety pivots on the alias-table insert below.
   INSERT INTO public.organizations (name, domain, status, source, tags, custom_fields)
   VALUES (
     COALESCE(NULLIF(trim(p_name), ''), v_fallback),
@@ -87,31 +92,33 @@ BEGIN
     '[]'::jsonb,
     '{}'::jsonb
   )
-  ON CONFLICT (domain) DO UPDATE
-    SET updated_at = now()
-  RETURNING id INTO v_org_id;
+  RETURNING id INTO v_new_org_id;
 
-  -- Step 3: alias-table mirror. ON CONFLICT DO NOTHING covers two cases:
-  --   (a) PK collision (org_id, domain) on retry of same caller — no-op.
-  --   (b) lower(domain) UNIQUE collision against a different org_id from a
-  --       racing session — we accept their winner and re-SELECT below.
+  -- Step 3: claim the alias. organization_domains has UNIQUE INDEX on
+  -- lower(domain). ON CONFLICT DO NOTHING swallows the race when another
+  -- session got there first.
   INSERT INTO public.organization_domains (organization_id, domain, is_primary, source)
-  VALUES (v_org_id, v_norm_domain, true, 'auto-derived')
+  VALUES (v_new_org_id, v_norm_domain, true, 'auto-derived')
   ON CONFLICT DO NOTHING;
 
   -- Step 4: re-resolve through the alias table — that's the canonical
-  -- domain → org pointer. If step 3 lost the race, this returns the
-  -- winning session's org_id; our org row from step 2 stays orphaned in
-  -- the rare race window (acceptable: it carries source='enriched' and
-  -- can be merged or cleaned up by a future operator UI). The
-  -- ON CONFLICT (domain) on organizations in step 2 makes orphans
-  -- exceptionally rare anyway.
-  SELECT organization_id INTO v_org_id
+  -- domain → org pointer. If step 3 won, returns v_new_org_id. If step 3
+  -- lost the race, returns the winning session's org_id and our step-2
+  -- row is orphaned.
+  SELECT organization_id INTO v_winning_id
   FROM public.organization_domains
   WHERE lower(domain) = v_norm_domain
   LIMIT 1;
 
-  RETURN v_org_id;
+  -- Step 5: clean up the orphan if we lost the race. Tight scope:
+  -- only delete the row WE just created (matched by id), and only when
+  -- it's not the canonical winner. Avoids any chance of touching an
+  -- unrelated org that happens to share this domain in the legacy data.
+  IF v_winning_id IS DISTINCT FROM v_new_org_id THEN
+    DELETE FROM public.organizations WHERE id = v_new_org_id;
+  END IF;
+
+  RETURN v_winning_id;
 END;
 $$;
 
