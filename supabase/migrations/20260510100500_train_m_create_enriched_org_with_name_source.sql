@@ -21,6 +21,15 @@
 
 BEGIN;
 
+-- Train L installed a 2-arg overload (text, text). Adding the 4-arg
+-- overload below would coexist alongside it because CREATE OR REPLACE
+-- only matches an identical signature. Two callable signatures with
+-- compatible types make any 2-arg call ambiguous ("could not choose a
+-- best candidate function"). Drop the old overload explicitly so there's
+-- exactly one create_enriched_org_for_domain function — the new 4-arg
+-- one with defaults that handles old 2-arg call sites cleanly.
+DROP FUNCTION IF EXISTS public.create_enriched_org_for_domain(text, text);
+
 CREATE OR REPLACE FUNCTION public.create_enriched_org_for_domain(
   p_name              text,
   p_domain            text,
@@ -84,9 +93,13 @@ BEGIN
 
   -- Step 3: alias-table insert pivots the race. Two concurrent workers for
   -- the same fresh domain both land here; ON CONFLICT swallows the loser's.
+  -- Bare ON CONFLICT (no column spec) lets Postgres match the existing
+  -- expression-based UNIQUE INDEX on lower(domain) — using `(domain)`
+  -- would fail with "no unique or exclusion constraint matching" because
+  -- the index is on the lowered expression, not the bare column.
   INSERT INTO public.organization_domains (organization_id, domain, is_primary, source)
   VALUES (v_new_org_id, v_norm_domain, true, 'auto-derived')
-  ON CONFLICT (domain) DO NOTHING;
+  ON CONFLICT DO NOTHING;
 
   -- Step 4: re-read the alias table. If we won, this returns our new org id.
   -- If we lost, it returns the winning org id and we orphan our row.
@@ -111,11 +124,6 @@ COMMENT ON FUNCTION public.create_enriched_org_for_domain(text, text, text, bool
   'Train M: race-safe org+alias create. Stamps name_source (enriched_ai | '
   'homepage | domain_stem) and name_pending_review based on resolver outcome. '
   'Old 2-arg call sites still work via parameter defaults.';
-
--- Note: we keep the original 2-arg overload working through PostgreSQL's
--- DEFAULT mechanism (callers passing only p_name, p_domain bind to the new
--- function with defaults). No need to drop the old signature; it didn't
--- exist as a separate overload — Train L only defined it once.
 
 COMMIT;
 
