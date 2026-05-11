@@ -50,7 +50,10 @@ serve(async (req) => {
           .order('imported_at', { ascending: false })
           .limit(PAGE);
         if (mailboxId) q = q.eq('mailbox_id', mailboxId);
-        if (status && status !== 'all') q = q.eq('enrichment_status', status);
+        if (status && status !== 'all') {
+          if (status === 'failed') q = q.in('enrichment_status', ['failed', 'import_failed']);
+          else q = q.eq('enrichment_status', status);
+        }
         if (from) q = q.gte('imported_at', from);
         if (to) q = q.lte('imported_at', to);
         if (cursor) q = q.lt('imported_at', cursor);

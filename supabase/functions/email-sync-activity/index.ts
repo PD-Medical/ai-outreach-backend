@@ -56,7 +56,13 @@ serve(async (req) => {
     .limit(limit + 1);
 
   if (mailboxId) query = query.eq('mailbox_id', mailboxId);
-  if (status && status !== 'all') query = query.eq('enrichment_status', status);
+  // The UI's "Failed" tab unifies enrichment failures with import failures
+  // (rows synthesised by v_email_activity from email_import_errors). All
+  // other statuses are exact matches.
+  if (status && status !== 'all') {
+    if (status === 'failed') query = query.in('enrichment_status', ['failed', 'import_failed']);
+    else query = query.eq('enrichment_status', status);
+  }
   if (from) query = query.gte('imported_at', from);
   if (to) query = query.lte('imported_at', to);
   if (q) query = query.or(
@@ -79,7 +85,10 @@ serve(async (req) => {
   if (!cursor) {
     let countQ = supabase.from('v_email_activity').select('id', { count: 'exact', head: true });
     if (mailboxId) countQ = countQ.eq('mailbox_id', mailboxId);
-    if (status && status !== 'all') countQ = countQ.eq('enrichment_status', status);
+    if (status && status !== 'all') {
+      if (status === 'failed') countQ = countQ.in('enrichment_status', ['failed', 'import_failed']);
+      else countQ = countQ.eq('enrichment_status', status);
+    }
     if (from) countQ = countQ.gte('imported_at', from);
     if (to) countQ = countQ.lte('imported_at', to);
     const { count } = await countQ;
