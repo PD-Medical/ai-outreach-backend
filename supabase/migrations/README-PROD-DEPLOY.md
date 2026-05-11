@@ -21,6 +21,59 @@ for the duration of the build.
 | `idx_email_import_errors_message_id` | `email_import_errors` | `20260502130400_email_import_errors_class.sql` |
 | `idx_email_import_errors_group` | `email_import_errors` | `20260502130300_email_import_failure_groups.sql` |
 
+### Train M / N (2026-05-10 / 11)
+
+The Train M / N rollout adds six more indexes on populated production tables.
+`email_import_errors` and `organizations` are the highest-row-count tables
+affected here; `contacts` and `role_address_patterns` are smaller but still
+worth the pre-create on a busy prod.
+
+| Index | Table | Migration |
+|-------|-------|-----------|
+| `idx_contacts_contact_type` | `contacts` | `20260510100000_train_m_contact_type_column.sql` |
+| `idx_organizations_name_source` | `organizations` | `20260510100100_train_m_org_name_source_and_review_flag.sql` |
+| `idx_organizations_name_pending_review` | `organizations` | `20260510100100_train_m_org_name_source_and_review_flag.sql` |
+| `idx_domain_resolution_attempts_last_attempted_at` | `domain_resolution_attempts` (new) | `20260510100200_train_m_domain_resolution_attempts.sql` |
+| `idx_role_address_patterns_category` | `role_address_patterns` | `20260510100300_train_m_role_address_categories.sql` |
+| `idx_email_import_errors_unresolved` | `email_import_errors` | `20260511030000_v_email_activity_union_import_errors.sql` |
+
+Pre-create these one at a time via psql before the migrations apply:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_contacts_contact_type
+  ON public.contacts(contact_type)
+  WHERE contact_type <> 'person';
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_organizations_name_source
+  ON public.organizations(name_source);
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_organizations_name_pending_review
+  ON public.organizations(id)
+  WHERE name_pending_review;
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_role_address_patterns_category
+  ON public.role_address_patterns(category)
+  WHERE is_active;
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_email_import_errors_unresolved
+  ON email_import_errors (mailbox_id, created_at DESC)
+  WHERE resolved_at IS NULL;
+```
+
+`idx_domain_resolution_attempts_last_attempted_at` is on a freshly-created
+table — safe to let the in-migration `CREATE INDEX` run on prod.
+
+### Train M / N — non-index data writes
+
+These migrations also issue UPDATEs that take row-exclusive locks on the
+named tables. They're fast on dev/staging; flag for monitoring on prod:
+
+- `20260510100100_train_m_org_name_source_and_review_flag.sql` — backfills
+  `name_source = 'seeded'` for organizations with `source = 'seeded'` and
+  flips a small number of rows' review flags.
+- `20260510100300_train_m_role_address_categories.sql` — extends
+  `role_address_patterns` with new pattern rows; one-shot insert, idempotent.
+
 ## Recommended production deploy procedure
 
 Before merging this work to production, run the index creation manually via
