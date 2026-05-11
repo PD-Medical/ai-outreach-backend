@@ -83,11 +83,23 @@ SELECT
 FROM email_import_errors err
 LEFT JOIN mailboxes m ON m.id = err.mailbox_id
 WHERE err.resolved_at IS NULL
+  -- Identity of an IMAP message is (mailbox_id, imap_folder, imap_uid),
+  -- which is UNIQUE on both `emails` and `email_import_errors`. message_id
+  -- is nullable and not unique enough — using it leaves a NULL hole.
   AND NOT EXISTS (
     SELECT 1 FROM emails e2
-    WHERE e2.message_id = err.message_id
-      AND err.message_id IS NOT NULL
+    WHERE e2.mailbox_id = err.mailbox_id
+      AND e2.imap_folder = err.imap_folder
+      AND e2.imap_uid = err.imap_uid
   );
+
+-- Partial index supporting the unresolved-errors leg above. The existing
+-- idx_email_import_errors_resolved is partial on (resolved_at IS NOT NULL)
+-- — the opposite predicate — so it cannot help this query. Without this
+-- index every page load over v_email_activity seq-scans email_import_errors.
+CREATE INDEX IF NOT EXISTS idx_email_import_errors_unresolved
+  ON email_import_errors (mailbox_id, created_at DESC)
+  WHERE resolved_at IS NULL;
 
 GRANT SELECT ON v_email_activity TO service_role;
 
