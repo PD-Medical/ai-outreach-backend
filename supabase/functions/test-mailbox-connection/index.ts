@@ -8,7 +8,21 @@ const corsHeaders = {
 };
 
 interface RequestBody {
-  mailbox_id: string;
+  // Existing mailbox: look up stored credentials.
+  mailbox_id?: string;
+  // New / unsaved mailbox: test the supplied credentials directly.
+  host?: string;
+  port?: number;
+  username?: string;
+  password?: string;
+}
+
+interface ImapCredentials {
+  email: string;
+  imap_host: string;
+  imap_port: number;
+  imap_username: string;
+  password: string;
 }
 
 serve(async (req: Request) => {
@@ -31,48 +45,68 @@ serve(async (req: Request) => {
     const body: RequestBody = await req.json();
     const { mailbox_id } = body;
 
-    if (!mailbox_id) {
-      return new Response(
-        JSON.stringify({ success: false, error: "mailbox_id is required" }),
-        { headers: { ...corsHeaders, "Content-Type": "application/json" }, status: 400 }
+    let credentials: ImapCredentials;
+
+    if (mailbox_id) {
+      // Existing mailbox: pull stored credentials via RPC.
+      const { data: creds, error: credError } = await supabase.rpc(
+        "get_mailbox_credentials",
+        { p_mailbox_id: mailbox_id }
       );
-    }
 
-    // Get mailbox credentials using RPC function
-    const { data: credentials, error: credError } = await supabase.rpc(
-      "get_mailbox_credentials",
-      { p_mailbox_id: mailbox_id }
-    );
-
-    if (credError) {
-      console.error("Failed to get credentials:", credError);
-      return new Response(
-        JSON.stringify({ success: false, error: "Failed to retrieve mailbox credentials" }),
-        { headers: { ...corsHeaders, "Content-Type": "application/json" }, status: 500 }
-      );
-    }
-
-    if (!credentials?.success) {
-      return new Response(
-        JSON.stringify({ success: false, error: credentials?.error || "Mailbox not found" }),
-        { headers: { ...corsHeaders, "Content-Type": "application/json" }, status: 404 }
-      );
-    }
-
-    // Check if password is available
-    if (!credentials.password) {
-      // Try fallback to environment variable (backward compatibility)
-      const envPassword = Deno.env.get(`IMAP_PASSWORD_${mailbox_id.replace(/-/g, "_")}`);
-      if (!envPassword) {
+      if (credError) {
+        console.error("Failed to get credentials:", credError);
         return new Response(
-          JSON.stringify({
-            success: false,
-            error: "No password configured for this mailbox. Please update the mailbox settings."
-          }),
+          JSON.stringify({ success: false, error: "Failed to retrieve mailbox credentials" }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" }, status: 500 }
+        );
+      }
+
+      if (!creds?.success) {
+        return new Response(
+          JSON.stringify({ success: false, error: creds?.error || "Mailbox not found" }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" }, status: 404 }
+        );
+      }
+
+      let password: string | undefined = creds.password;
+      if (!password) {
+        // Fallback to environment variable (backward compatibility).
+        password = Deno.env.get(`IMAP_PASSWORD_${mailbox_id.replace(/-/g, "_")}`) ?? undefined;
+        if (!password) {
+          return new Response(
+            JSON.stringify({
+              success: false,
+              error: "No password configured for this mailbox. Please update the mailbox settings."
+            }),
+            { headers: { ...corsHeaders, "Content-Type": "application/json" }, status: 400 }
+          );
+        }
+      }
+
+      credentials = {
+        email: creds.email,
+        imap_host: creds.imap_host,
+        imap_port: creds.imap_port,
+        imap_username: creds.imap_username,
+        password,
+      };
+    } else {
+      // New / unsaved mailbox: test the supplied credentials directly.
+      const { host, port, username, password } = body;
+      if (!host || !username || !password) {
+        return new Response(
+          JSON.stringify({ success: false, error: "host, username and password are required" }),
           { headers: { ...corsHeaders, "Content-Type": "application/json" }, status: 400 }
         );
       }
-      credentials.password = envPassword;
+      credentials = {
+        email: username,
+        imap_host: host,
+        imap_port: port || 993,
+        imap_username: username,
+        password,
+      };
     }
 
     // Import IMAP client
