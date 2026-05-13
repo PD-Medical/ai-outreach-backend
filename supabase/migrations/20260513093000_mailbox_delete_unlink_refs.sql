@@ -8,7 +8,7 @@
 
 -- campaign_sequences.from_mailbox_id is already nullable; just relax the FK.
 ALTER TABLE public.campaign_sequences
-  DROP CONSTRAINT campaign_sequences_from_mailbox_id_fkey;
+  DROP CONSTRAINT IF EXISTS campaign_sequences_from_mailbox_id_fkey;
 
 ALTER TABLE public.campaign_sequences
   ADD  CONSTRAINT campaign_sequences_from_mailbox_id_fkey
@@ -18,7 +18,7 @@ ALTER TABLE public.campaign_sequences
 ALTER TABLE public.email_drafts ALTER COLUMN from_mailbox_id DROP NOT NULL;
 
 ALTER TABLE public.email_drafts
-  DROP CONSTRAINT email_drafts_from_mailbox_id_fkey;
+  DROP CONSTRAINT IF EXISTS email_drafts_from_mailbox_id_fkey;
 
 ALTER TABLE public.email_drafts
   ADD  CONSTRAINT email_drafts_from_mailbox_id_fkey
@@ -29,7 +29,7 @@ ALTER TABLE public.email_drafts
 ALTER TABLE public.email_agent_runs ALTER COLUMN from_mailbox_id DROP NOT NULL;
 
 ALTER TABLE public.email_agent_runs
-  DROP CONSTRAINT email_agent_runs_from_mailbox_id_fkey;
+  DROP CONSTRAINT IF EXISTS email_agent_runs_from_mailbox_id_fkey;
 
 ALTER TABLE public.email_agent_runs
   ADD  CONSTRAINT email_agent_runs_from_mailbox_id_fkey
