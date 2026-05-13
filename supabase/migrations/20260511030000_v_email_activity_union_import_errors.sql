@@ -10,7 +10,12 @@
 -- a synthetic enrichment_status = 'import_failed'. The edge function
 -- maps the UI's 'failed' tab to enrichment_status IN ('failed','import_failed').
 
-CREATE OR REPLACE VIEW v_email_activity
+-- The new shape adds rows + reorders columns vs. the previous v_email_activity
+-- (created in 20260502130800_v_email_activity.sql). Postgres rejects CREATE OR
+-- REPLACE VIEW when columns are dropped/reordered, so DROP first then CREATE.
+DROP VIEW IF EXISTS v_email_activity CASCADE;
+
+CREATE VIEW v_email_activity
 WITH (security_invoker = true) AS
 SELECT
   e.id,
