@@ -23,6 +23,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.39.0';
 import { withDenoImapClient } from '../_shared/email/deno-imap-client.ts';
 import { createThreadId } from '../_shared/email/thread-builder.ts';
 import { parseImapMessages, shouldImportEmail } from '../_shared/email/email-parser.ts';
+import { loadHostDomains } from '../_shared/email/host-org.ts';
 import {
   importEmails,
   updateMailboxSyncStatus
@@ -175,6 +176,9 @@ serve(async (req) => {
     const startDate = start_date ? new Date(start_date) : undefined;
     const endDate = end_date ? new Date(end_date) : undefined;
 
+    // Load host-org registry once per invocation
+    const hostDomains = await loadHostDomains(supabase);
+
     // Fetch emails
     let totalProcessed = 0;
     let totalImported = 0;
@@ -211,11 +215,11 @@ serve(async (req) => {
       }
     } else if (imapMessages.length > 0) {
       // Parse emails
-      const parsedEmails = parseImapMessages(imapMessages, mailbox.email, currentFolder);
+      const parsedEmails = parseImapMessages(imapMessages, mailbox.email, currentFolder, hostDomains);
 
       // Apply CC deduplication and create thread IDs
       const emailsToImport = parsedEmails
-        .filter(email => shouldImportEmail(email, mailbox.email))
+        .filter(email => shouldImportEmail(email, mailbox.email, hostDomains))
         .map(email => ({
           ...email,
           thread_id: createThreadId(email)

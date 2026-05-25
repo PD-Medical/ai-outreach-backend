@@ -14,6 +14,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.39.0';
 import { withDenoImapClient } from '../_shared/email/deno-imap-client.ts';
 import { createThreadId } from '../_shared/email/thread-builder.ts';
 import { parseImapMessages, shouldImportEmail } from '../_shared/email/email-parser.ts';
+import { loadHostDomains } from '../_shared/email/host-org.ts';
 import {
   importEmails,
   getLastSyncedUid,
@@ -36,7 +37,8 @@ const MAX_CONCURRENT_MAILBOXES = parseInt(Deno.env.get('MAX_CONCURRENT_MAILBOXES
  */
 async function syncMailbox(
   supabase: any,
-  mailbox: Mailbox
+  mailbox: Mailbox,
+  hostDomains: Set<string>
 ): Promise<SyncResult> {
   const startTime = Date.now();
   const result: SyncResult = {
@@ -99,11 +101,11 @@ async function syncMailbox(
         console.log(`[Sync] Fetched ${imapMessages.length} new emails from ${folder}`);
 
         // Parse emails
-        const parsedEmails = parseImapMessages(imapMessages, mailbox.email, folder);
+        const parsedEmails = parseImapMessages(imapMessages, mailbox.email, folder, hostDomains);
 
         // Apply CC deduplication and create thread IDs
         const emailsToImport = parsedEmails
-          .filter(email => shouldImportEmail(email, mailbox.email))
+          .filter(email => shouldImportEmail(email, mailbox.email, hostDomains))
           .map(email => ({
             ...email,
             thread_id: createThreadId(email)
@@ -226,13 +228,17 @@ serve(async (req) => {
 
     console.log(`[Sync] Found ${mailboxes.length} active mailbox(es)`);
 
+    // Load host-org domain registry once per invocation
+    const hostDomains = await loadHostDomains(supabase);
+    console.log(`[Sync] Loaded ${hostDomains.size} host-org domain(s)`);
+
     // Sync mailboxes in parallel (configurable via MAX_CONCURRENT_MAILBOXES env var)
     const results: SyncResult[] = [];
 
     for (let i = 0; i < mailboxes.length; i += MAX_CONCURRENT_MAILBOXES) {
       const batch = mailboxes.slice(i, i + MAX_CONCURRENT_MAILBOXES);
       const batchResults = await Promise.all(
-        batch.map(mailbox => syncMailbox(supabase, mailbox))
+        batch.map(mailbox => syncMailbox(supabase, mailbox, hostDomains))
       );
       results.push(...batchResults);
     }

@@ -7,8 +7,21 @@
 //
 // `hostDomains` is a Set<string> of lowercased domains. Pass it explicitly
 // to keep helpers pure and easy to test.
+//
+// `loadHostDomains` accepts any Supabase client (typed as `unknown` to avoid
+// version-pinning conflicts between callers that import different supabase-js
+// versions).
 
-import { SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
+interface SupabaseLike {
+  from(table: string): {
+    select(cols: string): {
+      eq(col: string, val: unknown): Promise<{
+        data: Array<{ domain: string }> | null;
+        error: { message: string } | null;
+      }>;
+    };
+  };
+}
 
 function domainOf(address: string | null | undefined): string {
   if (!address) return "";
@@ -46,9 +59,10 @@ export function classifyIsInternal(
 }
 
 export async function loadHostDomains(
-  supabase: SupabaseClient,
+  supabase: SupabaseLike | unknown,
 ): Promise<Set<string>> {
-  const { data, error } = await supabase
+  const client = supabase as SupabaseLike;
+  const { data, error } = await client
     .from("organizations")
     .select("domain")
     .eq("is_host", true);
