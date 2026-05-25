@@ -53,6 +53,13 @@ WHERE lower(o.domain) IN (
 
 -- 6. Backfill emails.is_internal using the new registry.
 --    Email is internal iff every non-empty participant address is on a host domain.
+--
+--    Raise the statement timeout locally for this UPDATE: on a prod-sized emails
+--    table (post-PST backfill, ~hundreds of thousands of rows) the per-row
+--    array_remove + unnest + bool_and call may exceed the default Supabase
+--    migration runner timeout. Scoped to this transaction via SET LOCAL.
+SET LOCAL statement_timeout = '15min';
+
 UPDATE public.emails e
 SET is_internal = COALESCE((
   SELECT bool_and(public.is_host_domain(addr))
