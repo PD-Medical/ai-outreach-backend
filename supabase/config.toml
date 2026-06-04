@@ -65,6 +65,15 @@ verify_jwt = false
 [functions.mailchimp-newsletter-sync-scheduler]
 verify_jwt = false
 
+[functions.mailchimp-connector-status]
+verify_jwt = false
+
+[functions.mailchimp-contact-export-preview]
+verify_jwt = false
+
+[functions.mailchimp-contact-sync]
+verify_jwt = false
+
 [functions.get-tools]
 verify_jwt = false
 
