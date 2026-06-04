@@ -20,16 +20,36 @@ ALTER TABLE public.organizations
 ALTER TABLE public.emails
   ADD COLUMN IF NOT EXISTS is_internal BOOLEAN NOT NULL DEFAULT FALSE;
 
--- 3. Helper: is the given address on a host-org domain?
+-- 3. Helpers: is the given address on a host-org domain?
+--    organization_domains is the source of truth for primary + alias domains.
+--    organizations.domain remains as a fallback for legacy rows without aliases.
+CREATE OR REPLACE FUNCTION public.host_org_domains()
+RETURNS TABLE(domain text)
+LANGUAGE sql
+STABLE
+AS $$
+  SELECT DISTINCT lower(od.domain)::text AS domain
+  FROM public.organization_domains od
+  JOIN public.organizations o ON o.id = od.organization_id
+  WHERE o.is_host = TRUE
+    AND od.domain IS NOT NULL
+    AND od.domain <> ''
+  UNION
+  SELECT DISTINCT lower(o.domain)::text AS domain
+  FROM public.organizations o
+  WHERE o.is_host = TRUE
+    AND o.domain IS NOT NULL
+    AND o.domain <> '';
+$$;
+
 CREATE OR REPLACE FUNCTION public.is_host_domain(p_address text)
 RETURNS boolean
 LANGUAGE sql
 STABLE
 AS $$
   SELECT EXISTS (
-    SELECT 1 FROM public.organizations
-    WHERE is_host = TRUE
-      AND lower(domain) = lower(split_part(coalesce(p_address, ''), '@', 2))
+    SELECT 1 FROM public.host_org_domains() h
+    WHERE h.domain = lower(split_part(trim(both ' <>"' from coalesce(p_address, '')), '@', 2))
   );
 $$;
 

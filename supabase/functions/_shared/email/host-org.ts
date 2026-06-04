@@ -16,7 +16,10 @@ interface SupabaseLike {
   from(table: string): {
     select(cols: string): {
       eq(col: string, val: unknown): Promise<{
-        data: Array<{ domain: string }> | null;
+        data: Array<{
+          domain: string | null;
+          organization_domains?: Array<{ domain: string | null }> | null;
+        }> | null;
         error: { message: string } | null;
       }>;
     };
@@ -27,7 +30,7 @@ function domainOf(address: string | null | undefined): string {
   if (!address) return "";
   const at = address.lastIndexOf("@");
   if (at < 0) return "";
-  return address.slice(at + 1).toLowerCase();
+  return address.slice(at + 1).trim().replace(/[<>"\s]+$/g, "").toLowerCase();
 }
 
 export function isHostDomain(
@@ -64,7 +67,7 @@ export async function loadHostDomains(
   const client = supabase as SupabaseLike;
   const { data, error } = await client
     .from("organizations")
-    .select("domain")
+    .select("domain, organization_domains(domain)")
     .eq("is_host", true);
 
   if (error) {
@@ -72,5 +75,13 @@ export async function loadHostDomains(
     return new Set();
   }
 
-  return new Set((data ?? []).map((r) => String(r.domain).toLowerCase()));
+  const domains = new Set<string>();
+  for (const row of data ?? []) {
+    if (row.domain) domains.add(String(row.domain).toLowerCase());
+    for (const alias of row.organization_domains ?? []) {
+      if (alias.domain) domains.add(String(alias.domain).toLowerCase());
+    }
+  }
+
+  return domains;
 }

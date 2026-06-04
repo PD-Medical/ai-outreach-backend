@@ -8,6 +8,7 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.0";
+import { requireAdmin } from "../_shared/auth.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -22,6 +23,9 @@ serve(async (req: Request) => {
   }
 
   try {
+    const auth = await requireAdmin(req);
+    if (auth instanceof Response) return auth;
+
     const { domain } = (await req.json()) as { domain?: string };
     if (!domain || typeof domain !== "string") {
       return json({ error: "domain is required" }, 400);
