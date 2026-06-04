@@ -7,8 +7,9 @@
 --   * is_host_domain(text)   - SQL helper queried by triggers, RPC, and ad-hoc filters
 --   * v_contacts_with_internal - view used by contact lists, lead-gen, campaign targeting
 --
--- Backfill marks the existing PDMedical org as host (matched against active
--- mailbox domains) and recomputes is_internal for every existing email row.
+-- This migration is schema-only. Environment-specific host organization
+-- selection and historical email reclassification are handled explicitly by
+-- scripts/host_org_one_time_setup.py and rebuild_email_scopes_for_domain(domain).
 
 BEGIN;
 
@@ -61,40 +62,7 @@ SELECT
 FROM public.contacts c
 LEFT JOIN public.organizations o ON o.id = c.organization_id;
 
--- 5. Auto-detect host orgs from existing active mailboxes.
---    Matches any organization whose domain equals the domain of any active mailbox.
-UPDATE public.organizations o
-SET is_host = TRUE
-WHERE lower(o.domain) IN (
-  SELECT DISTINCT lower(split_part(m.email, '@', 2))
-  FROM public.mailboxes m
-  WHERE m.is_active = TRUE
-);
-
--- 6. Backfill emails.is_internal using the new registry.
---    Email is internal iff every non-empty participant address is on a host domain.
---
---    Raise the statement timeout locally for this UPDATE: on a prod-sized emails
---    table (post-PST backfill, ~hundreds of thousands of rows) the per-row
---    array_remove + unnest + bool_and call may exceed the default Supabase
---    migration runner timeout. Scoped to this transaction via SET LOCAL.
-SET LOCAL statement_timeout = '15min';
-
-UPDATE public.emails e
-SET is_internal = COALESCE((
-  SELECT bool_and(public.is_host_domain(addr))
-  FROM unnest(
-    array_remove(
-      ARRAY[e.from_email] || COALESCE(e.to_emails, ARRAY[]::text[])
-                          || COALESCE(e.cc_emails, ARRAY[]::text[])
-                          || COALESCE(e.bcc_emails, ARRAY[]::text[]),
-      NULL
-    )
-  ) AS addr
-  WHERE addr IS NOT NULL AND addr <> ''
-), FALSE);
-
--- 7. Indexes (created after backfill so they populate correctly).
+-- 5. Indexes for host-org filtering and later explicit rebuilds.
 CREATE INDEX IF NOT EXISTS organizations_is_host_partial
   ON public.organizations (is_host) WHERE is_host = TRUE;
 
