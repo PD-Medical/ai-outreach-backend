@@ -25,6 +25,17 @@
 -- Indexes
 -- ---------------------------------------------------------------------------
 
+CREATE OR REPLACE FUNCTION public.search_text_from_text_array(p_values text[])
+RETURNS text
+LANGUAGE sql
+IMMUTABLE
+AS $$
+  SELECT array_to_string(coalesce(p_values, ARRAY[]::text[]), ' ')
+$$;
+
+COMMENT ON FUNCTION public.search_text_from_text_array(text[]) IS
+  'Immutable text[] formatter for KAN-20 trigram search indexes. array_to_string(text[], text) is deterministic for text arrays but is not marked immutable by Postgres, so expression indexes need this wrapper.';
+
 CREATE INDEX IF NOT EXISTS contacts_search_gin
   ON public.contacts USING gin (
     (
@@ -56,9 +67,9 @@ CREATE INDEX IF NOT EXISTS emails_search_gin
       coalesce(subject, '')      || ' ' ||
       coalesce(from_email, '')   || ' ' ||
       coalesce(from_name, '')    || ' ' ||
-      array_to_string(coalesce(to_emails,  ARRAY[]::text[]), ' ') || ' ' ||
-      array_to_string(coalesce(cc_emails,  ARRAY[]::text[]), ' ') || ' ' ||
-      array_to_string(coalesce(bcc_emails, ARRAY[]::text[]), ' ') || ' ' ||
+      public.search_text_from_text_array(to_emails) || ' ' ||
+      public.search_text_from_text_array(cc_emails) || ' ' ||
+      public.search_text_from_text_array(bcc_emails) || ' ' ||
       coalesce(body_clean, '')
     ) gin_trgm_ops
   );
@@ -157,9 +168,9 @@ AS $$
         coalesce(e.subject, '')    || ' ' ||
         coalesce(e.from_email, '') || ' ' ||
         coalesce(e.from_name, '')  || ' ' ||
-        array_to_string(coalesce(e.to_emails,  ARRAY[]::text[]), ' ') || ' ' ||
-        array_to_string(coalesce(e.cc_emails,  ARRAY[]::text[]), ' ') || ' ' ||
-        array_to_string(coalesce(e.bcc_emails, ARRAY[]::text[]), ' ') || ' ' ||
+        public.search_text_from_text_array(e.to_emails) || ' ' ||
+        public.search_text_from_text_array(e.cc_emails) || ' ' ||
+        public.search_text_from_text_array(e.bcc_emails) || ' ' ||
         coalesce(e.body_clean, '')
       ) ILIKE t.pat
       OR
