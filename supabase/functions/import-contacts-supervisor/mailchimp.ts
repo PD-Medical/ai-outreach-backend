@@ -1,6 +1,11 @@
 // Mailchimp Import Module
 // Handles Mailchimp API connection and contact extraction
 
+import {
+  namesForMailchimpImport,
+  normalizeMailchimpMemberName,
+} from '../_shared/mailchimp-contacts.ts';
+
 export interface Contact {
   email: string;
   first_name?: string;
@@ -16,6 +21,31 @@ export interface MailchimpConfig {
   apiKey: string;
   serverPrefix: string; // e.g., "us1", "us2", etc.
   listId: string;
+}
+
+async function loadExistingContactsByEmail(
+  supabaseClient: any,
+  emails: string[],
+): Promise<Map<string, { first_name?: string | null; last_name?: string | null }>> {
+  const uniqueEmails = [...new Set(emails.map((email) => email.toLowerCase()).filter(Boolean))];
+  if (uniqueEmails.length === 0) return new Map();
+
+  const { data, error } = await supabaseClient
+    .from('contacts')
+    .select('email, first_name, last_name')
+    .in('email', uniqueEmails);
+
+  if (error) {
+    throw new Error(`Failed to load existing contacts before Mailchimp import: ${error.message}`);
+  }
+
+  return new Map((data ?? []).map((contact: any) => [
+    String(contact.email).toLowerCase(),
+    {
+      first_name: contact.first_name ?? null,
+      last_name: contact.last_name ?? null,
+    },
+  ]));
 }
 
 export async function importFromMailchimp(
@@ -85,26 +115,43 @@ export async function importFromMailchimp(
         break; // No more members to fetch
       }
       
+      const existingContactsByEmail = await loadExistingContactsByEmail(
+        supabaseClient,
+        members.map((member: any) => member.email_address),
+      );
+
       // Process members from this batch
-      const batchContacts = members.map((member: any) => ({
-        email: member.email_address.toLowerCase(),
-        first_name: member.merge_fields?.FNAME || undefined,
-        last_name: member.merge_fields?.LNAME || undefined,
-        source: 'mailchimp',
-        quality_score: 75,
-        status: member.status === 'subscribed' ? 'active' : 'inactive',
-        tags: member.tags?.map((tag: any) => tag.name) || [],
-        custom_fields: {
-          imported_from: 'mailchimp',
-          import_date: new Date().toISOString(),
-          mailchimp_id: member.id,
-          mailchimp_status: member.status,
-          mailchimp_list_id: config.listId,
-          signup_date: member.timestamp_signup,
-          last_changed: member.last_changed,
-          merge_fields: member.merge_fields || {}
-        }
-      }));
+      const batchContacts = members.map((member: any) => {
+        const email = member.email_address.toLowerCase();
+        const normalizedName = normalizeMailchimpMemberName(
+          member.merge_fields?.FNAME,
+          member.merge_fields?.LNAME,
+        );
+        const importName = namesForMailchimpImport(
+          normalizedName,
+          existingContactsByEmail.get(email),
+        );
+
+        return {
+          email,
+          ...(importName.firstName ? { first_name: importName.firstName } : {}),
+          ...(importName.lastName ? { last_name: importName.lastName } : {}),
+          source: 'mailchimp',
+          quality_score: 75,
+          status: member.status === 'subscribed' ? 'active' : 'inactive',
+          tags: member.tags?.map((tag: any) => tag.name) || [],
+          custom_fields: {
+            imported_from: 'mailchimp',
+            import_date: new Date().toISOString(),
+            mailchimp_id: member.id,
+            mailchimp_status: member.status,
+            mailchimp_list_id: config.listId,
+            signup_date: member.timestamp_signup,
+            last_changed: member.last_changed,
+            merge_fields: member.merge_fields || {}
+          }
+        };
+      });
       
       contacts.push(...batchContacts);
       offset += members.length;

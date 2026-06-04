@@ -1,4 +1,4 @@
-import { SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import type { SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
 export interface MailchimpAudience {
   id: string;
@@ -57,6 +57,19 @@ export interface SyncStats {
   errors: number;
   dry_run: boolean;
 }
+
+export interface NormalizedMailchimpName {
+  firstName: string | null;
+  lastName: string | null;
+}
+
+interface ExistingNameFields {
+  first_name?: string | null;
+  last_name?: string | null;
+}
+
+const TITLE_PREFIX_PATTERN = /^(dr|mr|mrs|ms|miss|prof|professor|a\/prof|assoc\.?\s+prof)\.?\s+/i;
+const BRACKETED_HINT_PATTERN = /\s*[\(\[][^)\]]+[\)\]]\s*/g;
 
 function getMailchimpApiKey(): string {
   const apiKey = Deno.env.get('MAILCHIMP_API_KEY');
@@ -199,6 +212,69 @@ function memberMergeField(member: MailchimpMember, key: string): string | null {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
 
+function cleanMailchimpNamePart(value: string | null | undefined): string | null {
+  const cleaned = (value ?? '')
+    .replace(BRACKETED_HINT_PATTERN, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(TITLE_PREFIX_PATTERN, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return cleaned || null;
+}
+
+export function normalizeMailchimpMemberName(
+  firstName: string | null | undefined,
+  lastName: string | null | undefined,
+): NormalizedMailchimpName {
+  const cleanedFirst = cleanMailchimpNamePart(firstName);
+  const cleanedLast = cleanMailchimpNamePart(lastName);
+
+  if (!cleanedFirst) {
+    return {
+      firstName: null,
+      lastName: cleanedLast,
+    };
+  }
+
+  if (cleanedLast) {
+    return {
+      firstName: cleanedFirst,
+      lastName: cleanedLast,
+    };
+  }
+
+  const parts = cleanedFirst.split(' ').filter(Boolean);
+  if (parts.length <= 1) {
+    return {
+      firstName: cleanedFirst,
+      lastName: null,
+    };
+  }
+
+  return {
+    firstName: parts[0],
+    lastName: parts.slice(1).join(' '),
+  };
+}
+
+function hasText(value: string | null | undefined): boolean {
+  return Boolean(value && value.trim());
+}
+
+export function namesForMailchimpImport(
+  normalizedName: NormalizedMailchimpName,
+  existing?: ExistingNameFields | null,
+): NormalizedMailchimpName {
+  if (!existing) return normalizedName;
+
+  return {
+    firstName: hasText(existing.first_name) ? null : normalizedName.firstName,
+    lastName: hasText(existing.last_name) ? null : normalizedName.lastName,
+  };
+}
+
 async function getTagPrefix(supabase: SupabaseClient): Promise<string> {
   const { data } = await supabase
     .from('system_config')
@@ -291,14 +367,19 @@ export async function importMailchimpContacts(
     try {
       const { data: existing } = await supabase
         .from('contacts')
-        .select('id')
+        .select('id, first_name, last_name')
         .eq('email', email)
         .maybeSingle();
+      const normalizedName = normalizeMailchimpMemberName(
+        memberMergeField(member, 'FNAME'),
+        memberMergeField(member, 'LNAME'),
+      );
+      const importName = namesForMailchimpImport(normalizedName, existing);
 
       const { data, error } = await supabase.rpc('upsert_contact_with_org_v2', {
         p_email: email,
-        p_first_name: memberMergeField(member, 'FNAME'),
-        p_last_name: memberMergeField(member, 'LNAME'),
+        p_first_name: importName.firstName,
+        p_last_name: importName.lastName,
         p_job_title: null,
         p_role: null,
         p_phone: memberMergeField(member, 'PHONE'),
