@@ -36,6 +36,8 @@ interface ExclusionConfig {
   excludeActiveCampaigns: boolean;
   excludeContactedDays: number | null;
   excludeCampaignIds: string[];
+  includeInternalContacts?: boolean;
+  excludeContactIds?: string[];
 }
 
 interface ActionConfig {
@@ -89,6 +91,7 @@ interface CampaignCreateRequest {
   fromMailboxId: string;
   productId?: string;
   recurrence?: RecurrenceSettings; // Outlook-style recurring schedules
+  selectedContactIds?: string[];
 }
 
 serve(async (req) => {
@@ -252,6 +255,7 @@ serve(async (req) => {
     let successMessage: string;
     if (isRecurring) {
       const patternText = {
+        none: '',
         daily: 'daily',
         weekly: 'weekly',
         monthly: 'monthly',
