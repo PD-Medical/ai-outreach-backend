@@ -161,39 +161,33 @@ CREATE POLICY "contact_activity_attachments read authenticated"
   ON public.contact_activity_attachments FOR SELECT TO authenticated
   USING (true);
 DROP POLICY IF EXISTS "contact_activity_attachments write authenticated" ON public.contact_activity_attachments;
-CREATE POLICY "contact_activity_attachments write authenticated"
-  ON public.contact_activity_attachments FOR ALL TO authenticated
-  USING (true)
-  WITH CHECK (true);
 
 DROP POLICY IF EXISTS "contact_call_plans read authenticated" ON public.contact_call_plans;
 CREATE POLICY "contact_call_plans read authenticated"
   ON public.contact_call_plans FOR SELECT TO authenticated
   USING (true);
 DROP POLICY IF EXISTS "contact_call_plans write authenticated" ON public.contact_call_plans;
-CREATE POLICY "contact_call_plans write authenticated"
-  ON public.contact_call_plans FOR ALL TO authenticated
-  USING (true)
-  WITH CHECK (true);
 
 DROP POLICY IF EXISTS "contact_context_snapshots read authenticated" ON public.contact_context_snapshots;
 CREATE POLICY "contact_context_snapshots read authenticated"
   ON public.contact_context_snapshots FOR SELECT TO authenticated
   USING (true);
 DROP POLICY IF EXISTS "contact_context_snapshots write authenticated" ON public.contact_context_snapshots;
-CREATE POLICY "contact_context_snapshots write authenticated"
-  ON public.contact_context_snapshots FOR ALL TO authenticated
-  USING (true)
-  WITH CHECK (true);
 
 GRANT SELECT ON public.contact_activities TO authenticated;
 REVOKE INSERT, UPDATE, DELETE ON public.contact_activities FROM authenticated;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.contact_activities TO service_role;
-GRANT SELECT, INSERT, UPDATE, DELETE ON public.contact_activity_attachments TO authenticated, service_role;
+GRANT SELECT ON public.contact_activity_attachments TO authenticated;
+REVOKE INSERT, UPDATE, DELETE ON public.contact_activity_attachments FROM authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.contact_activity_attachments TO service_role;
 GRANT SELECT ON public.contact_activity_revisions TO authenticated;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.contact_activity_revisions TO service_role;
-GRANT SELECT, INSERT, UPDATE, DELETE ON public.contact_call_plans TO authenticated, service_role;
-GRANT SELECT, INSERT, UPDATE, DELETE ON public.contact_context_snapshots TO authenticated, service_role;
+GRANT SELECT ON public.contact_call_plans TO authenticated;
+REVOKE INSERT, UPDATE, DELETE ON public.contact_call_plans FROM authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.contact_call_plans TO service_role;
+GRANT SELECT ON public.contact_context_snapshots TO authenticated;
+REVOKE INSERT, UPDATE, DELETE ON public.contact_context_snapshots FROM authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.contact_context_snapshots TO service_role;
 
 INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
 VALUES (
@@ -209,29 +203,26 @@ SET public = false,
     allowed_mime_types = NULL;
 
 DROP POLICY IF EXISTS "Users can read crm activity attachments" ON storage.objects;
-CREATE POLICY "Users can read crm activity attachments"
-ON storage.objects FOR SELECT
-TO authenticated
-USING (bucket_id = 'crm-activity-attachments');
 
 DROP POLICY IF EXISTS "Users can upload crm activity attachments" ON storage.objects;
 CREATE POLICY "Users can upload crm activity attachments"
 ON storage.objects FOR INSERT
 TO authenticated
-WITH CHECK (bucket_id = 'crm-activity-attachments');
+WITH CHECK (
+  bucket_id = 'crm-activity-attachments'
+  AND (storage.foldername(name))[1] = auth.uid()::text
+);
 
 DROP POLICY IF EXISTS "Users can update crm activity attachments" ON storage.objects;
-CREATE POLICY "Users can update crm activity attachments"
-ON storage.objects FOR UPDATE
-TO authenticated
-USING (bucket_id = 'crm-activity-attachments')
-WITH CHECK (bucket_id = 'crm-activity-attachments');
 
 DROP POLICY IF EXISTS "Users can delete crm activity attachments" ON storage.objects;
 CREATE POLICY "Users can delete crm activity attachments"
 ON storage.objects FOR DELETE
 TO authenticated
-USING (bucket_id = 'crm-activity-attachments');
+USING (
+  bucket_id = 'crm-activity-attachments'
+  AND (storage.foldername(name))[1] = auth.uid()::text
+);
 
 CREATE OR REPLACE FUNCTION public._contact_activity_actor()
 RETURNS uuid
@@ -281,8 +272,20 @@ BEGIN
   IF p_contact_id IS NULL THEN
     RAISE EXCEPTION 'contact_id is required';
   END IF;
+  IF v_actor IS NULL THEN
+    RAISE EXCEPTION 'authenticated user required';
+  END IF;
   IF NULLIF(trim(p_title), '') IS NULL THEN
     RAISE EXCEPTION 'title is required';
+  END IF;
+  IF p_activity_type NOT IN ('call', 'follow_up', 'note', 'file') THEN
+    RAISE EXCEPTION 'invalid manual activity type';
+  END IF;
+  IF COALESCE(p_priority, 'medium') NOT IN ('low', 'medium', 'high', 'urgent') THEN
+    RAISE EXCEPTION 'invalid priority';
+  END IF;
+  IF p_direction IS NOT NULL AND p_direction NOT IN ('inbound', 'outbound') THEN
+    RAISE EXCEPTION 'invalid direction';
   END IF;
 
   SELECT * INTO v_contact
@@ -371,6 +374,121 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION public.create_file_contact_activity(
+  p_contact_id uuid,
+  p_title text,
+  p_body text DEFAULT NULL,
+  p_storage_path text DEFAULT NULL,
+  p_file_name text DEFAULT NULL,
+  p_content_type text DEFAULT NULL,
+  p_file_size bigint DEFAULT NULL,
+  p_metadata jsonb DEFAULT '{}'::jsonb
+)
+RETURNS public.contact_activities
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_contact contacts%ROWTYPE;
+  v_activity contact_activities%ROWTYPE;
+  v_actor uuid := public._contact_activity_actor();
+  v_metadata jsonb;
+BEGIN
+  IF v_actor IS NULL THEN
+    RAISE EXCEPTION 'authenticated user required';
+  END IF;
+  IF p_contact_id IS NULL THEN
+    RAISE EXCEPTION 'contact_id is required';
+  END IF;
+  IF NULLIF(trim(COALESCE(p_title, '')), '') IS NULL THEN
+    RAISE EXCEPTION 'title is required';
+  END IF;
+  IF NULLIF(trim(COALESCE(p_storage_path, '')), '') IS NULL THEN
+    RAISE EXCEPTION 'storage_path is required';
+  END IF;
+  IF NULLIF(trim(COALESCE(p_file_name, '')), '') IS NULL THEN
+    RAISE EXCEPTION 'file_name is required';
+  END IF;
+  IF split_part(p_storage_path, '/', 1) <> v_actor::text THEN
+    RAISE EXCEPTION 'storage_path must be under the authenticated user prefix';
+  END IF;
+  IF split_part(p_storage_path, '/', 2) <> p_contact_id::text THEN
+    RAISE EXCEPTION 'storage_path must include the contact_id as the second path segment';
+  END IF;
+  IF p_file_size IS NOT NULL AND p_file_size < 0 THEN
+    RAISE EXCEPTION 'file_size must be non-negative';
+  END IF;
+
+  SELECT * INTO v_contact
+  FROM public.contacts
+  WHERE id = p_contact_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'contact not found';
+  END IF;
+
+  v_metadata := COALESCE(p_metadata, '{}'::jsonb) || jsonb_build_object(
+    'attachment_count', 1,
+    'file_name', trim(p_file_name),
+    'storage_bucket', 'crm-activity-attachments',
+    'storage_path', trim(p_storage_path)
+  );
+
+  INSERT INTO public.contact_activities (
+    contact_id,
+    organization_id,
+    activity_type,
+    title,
+    body,
+    status,
+    priority,
+    occurred_at,
+    visibility,
+    source_type,
+    metadata,
+    created_by
+  )
+  VALUES (
+    p_contact_id,
+    v_contact.organization_id,
+    'file',
+    trim(p_title),
+    NULLIF(trim(COALESCE(p_body, '')), ''),
+    'completed',
+    'medium',
+    now(),
+    'team',
+    'manual',
+    v_metadata,
+    v_actor
+  )
+  RETURNING * INTO v_activity;
+
+  INSERT INTO public.contact_activity_attachments (
+    activity_id,
+    storage_bucket,
+    storage_path,
+    file_name,
+    content_type,
+    file_size,
+    uploaded_by,
+    metadata
+  )
+  VALUES (
+    v_activity.id,
+    'crm-activity-attachments',
+    trim(p_storage_path),
+    trim(p_file_name),
+    NULLIF(trim(COALESCE(p_content_type, '')), ''),
+    p_file_size,
+    v_actor,
+    '{}'::jsonb
+  );
+
+  RETURN v_activity;
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION public.complete_contact_follow_up(p_activity_id uuid)
 RETURNS public.contact_activities
 LANGUAGE plpgsql
@@ -381,14 +499,60 @@ DECLARE
   v_activity contact_activities%ROWTYPE;
   v_actor uuid := public._contact_activity_actor();
   v_actor_profile uuid := public._contact_activity_actor_profile();
+  v_previous jsonb;
+  v_completed_at timestamptz := now();
 BEGIN
-  UPDATE public.contact_activities
-  SET status = 'completed',
-      completed_at = COALESCE(completed_at, now()),
-      completed_by = COALESCE(completed_by, v_actor),
-      updated_at = now()
+  IF v_actor IS NULL THEN
+    RAISE EXCEPTION 'authenticated user required';
+  END IF;
+  IF p_activity_id IS NULL THEN
+    RAISE EXCEPTION 'activity_id is required';
+  END IF;
+
+  SELECT *
+  INTO v_activity
+  FROM public.contact_activities
   WHERE id = p_activity_id
     AND activity_type = 'follow_up'
+    AND deleted_at IS NULL
+    AND status IN ('open', 'in_progress');
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'open follow-up activity not found';
+  END IF;
+
+  v_previous := jsonb_build_object(
+    'status', v_activity.status,
+    'completed_at', v_activity.completed_at,
+    'completed_by', v_activity.completed_by
+  );
+
+  INSERT INTO public.contact_activity_revisions (
+    activity_id,
+    edited_by,
+    previous_payload,
+    new_payload
+  )
+  VALUES (
+    p_activity_id,
+    v_actor,
+    v_previous,
+    jsonb_build_object(
+      'status', 'completed',
+      'completed_at', v_completed_at,
+      'completed_by', v_actor
+    )
+  );
+
+  UPDATE public.contact_activities
+  SET status = 'completed',
+      completed_at = v_completed_at,
+      completed_by = v_actor,
+      updated_at = v_completed_at
+  WHERE id = p_activity_id
+    AND activity_type = 'follow_up'
+    AND deleted_at IS NULL
+    AND status IN ('open', 'in_progress')
   RETURNING * INTO v_activity;
 
   IF NOT FOUND THEN
@@ -398,9 +562,9 @@ BEGIN
   IF v_activity.action_item_id IS NOT NULL THEN
     UPDATE public.action_items
     SET status = 'completed',
-        completed_at = COALESCE(completed_at, now()),
+        completed_at = v_completed_at,
         completed_by = COALESCE(completed_by, v_actor_profile),
-        updated_at = now()
+        updated_at = v_completed_at
     WHERE id = v_activity.action_item_id;
   END IF;
 
@@ -413,7 +577,7 @@ BEGIN
       AND ca.activity_type = 'follow_up'
       AND ca.status IN ('open', 'in_progress')
   ),
-  updated_at = now()
+  updated_at = v_completed_at
   WHERE c.id = v_activity.contact_id;
 
   RETURN v_activity;
@@ -694,15 +858,60 @@ AS $$
       max(updated_at) AS latest_activity_at,
       count(*) FILTER (
         WHERE activity_type = 'follow_up' AND status IN ('open', 'in_progress')
-      )::int AS open_follow_up_count
+      )::int AS open_follow_up_count,
+      md5(coalesce(jsonb_agg(
+        jsonb_build_object(
+          'id', id,
+          'activity_type', activity_type,
+          'title', title,
+          'body', body,
+          'status', status,
+          'priority', priority,
+          'direction', direction,
+          'due_at', due_at,
+          'completed_at', completed_at,
+          'deleted_at', deleted_at,
+          'updated_at', updated_at,
+          'metadata', metadata
+        )
+        ORDER BY updated_at DESC, id
+      )::text, '[]')) AS activity_fingerprint
     FROM public.contact_activities
     WHERE contact_id = p_contact_id
-      AND deleted_at IS NULL
+  ),
+  attachment_stats AS (
+    SELECT
+      count(a.*)::int AS attachment_count,
+      md5(coalesce(jsonb_agg(
+        jsonb_build_object(
+          'id', a.id,
+          'activity_id', a.activity_id,
+          'storage_path', a.storage_path,
+          'file_name', a.file_name,
+          'content_type', a.content_type,
+          'file_size', a.file_size,
+          'created_at', a.created_at
+        )
+        ORDER BY a.created_at DESC, a.id
+      )::text, '[]')) AS attachment_fingerprint
+    FROM public.contact_activity_attachments a
+    JOIN public.contact_activities ca ON ca.id = a.activity_id
+    WHERE ca.contact_id = p_contact_id
   ),
   campaign_stats AS (
     SELECT
       count(*)::int AS campaign_event_count,
-      max(event_timestamp) AS latest_campaign_at
+      max(event_timestamp) AS latest_campaign_at,
+      md5(coalesce(jsonb_agg(
+        jsonb_build_object(
+          'id', id,
+          'event_type', event_type,
+          'event_timestamp', event_timestamp,
+          'score', score,
+          'campaign_id', campaign_id
+        )
+        ORDER BY event_timestamp DESC, id
+      )::text, '[]')) AS campaign_fingerprint
     FROM public.campaign_events
     WHERE contact_id = p_contact_id
   )
@@ -713,9 +922,13 @@ AS $$
     'latest_campaign_at', campaign_stats.latest_campaign_at,
     'conversation_count', conversation_stats.conversation_count,
     'activity_count', activity_stats.activity_count,
+    'attachment_count', attachment_stats.attachment_count,
     'campaign_event_count', campaign_stats.campaign_event_count,
     'open_follow_up_count', activity_stats.open_follow_up_count,
     'summarized_email_count', conversation_stats.summarized_email_count,
+    'activity_fingerprint', activity_stats.activity_fingerprint,
+    'attachment_fingerprint', attachment_stats.attachment_fingerprint,
+    'campaign_fingerprint', campaign_stats.campaign_fingerprint,
     'context_hash', md5(
       concat_ws(
         '|',
@@ -726,11 +939,15 @@ AS $$
         conversation_stats.summarized_email_count::text,
         activity_stats.activity_count::text,
         activity_stats.open_follow_up_count::text,
-        campaign_stats.campaign_event_count::text
+        coalesce(activity_stats.activity_fingerprint, ''),
+        attachment_stats.attachment_count::text,
+        coalesce(attachment_stats.attachment_fingerprint, ''),
+        campaign_stats.campaign_event_count::text,
+        coalesce(campaign_stats.campaign_fingerprint, '')
       )
     )
   )
-  FROM conversation_stats, activity_stats, campaign_stats;
+  FROM conversation_stats, activity_stats, attachment_stats, campaign_stats;
 $$;
 
 DROP FUNCTION IF EXISTS public.get_contact_timeline(uuid, text, timestamptz, integer);
@@ -1114,6 +1331,118 @@ AS $$
   OFFSET GREATEST(COALESCE(p_page, 1) - 1, 0) * LEAST(GREATEST(COALESCE(p_page_size, 25), 1), 100);
 $$;
 
+CREATE OR REPLACE FUNCTION public.get_active_contact_call_plan(p_contact_id uuid)
+RETURNS public.contact_call_plans
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_actor uuid := public._contact_activity_actor();
+  v_plan contact_call_plans%ROWTYPE;
+BEGIN
+  IF v_actor IS NULL AND COALESCE(auth.role(), '') <> 'service_role' THEN
+    RAISE EXCEPTION 'authenticated user required';
+  END IF;
+  IF p_contact_id IS NULL THEN
+    RAISE EXCEPTION 'contact_id is required';
+  END IF;
+
+  SELECT *
+  INTO v_plan
+  FROM public.contact_call_plans
+  WHERE contact_id = p_contact_id
+    AND status = 'active'
+  ORDER BY generated_at DESC
+  LIMIT 1;
+
+  IF NOT FOUND THEN
+    RETURN NULL;
+  END IF;
+
+  RETURN v_plan;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.replace_active_contact_call_plan(
+  p_contact_id uuid,
+  p_context_snapshot_id uuid,
+  p_context_hash text,
+  p_instruction text,
+  p_opener text,
+  p_objective text,
+  p_talking_points text[] DEFAULT '{}',
+  p_questions text[] DEFAULT '{}',
+  p_likely_objections text[] DEFAULT '{}',
+  p_next_step text DEFAULT NULL,
+  p_after_call_prompt text DEFAULT NULL,
+  p_model text DEFAULT NULL,
+  p_tokens_input integer DEFAULT 0,
+  p_tokens_output integer DEFAULT 0
+)
+RETURNS public.contact_call_plans
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_plan contact_call_plans%ROWTYPE;
+BEGIN
+  IF COALESCE(auth.role(), '') <> 'service_role' THEN
+    RAISE EXCEPTION 'service role required';
+  END IF;
+  IF p_contact_id IS NULL THEN
+    RAISE EXCEPTION 'contact_id is required';
+  END IF;
+
+  INSERT INTO public.contact_call_plans (
+    contact_id,
+    context_snapshot_id,
+    context_hash,
+    instruction,
+    opener,
+    objective,
+    talking_points,
+    questions,
+    likely_objections,
+    next_step,
+    after_call_prompt,
+    status,
+    model,
+    tokens_input,
+    tokens_output
+  )
+  VALUES (
+    p_contact_id,
+    p_context_snapshot_id,
+    p_context_hash,
+    NULLIF(trim(COALESCE(p_instruction, '')), ''),
+    NULLIF(trim(COALESCE(p_opener, '')), ''),
+    NULLIF(trim(COALESCE(p_objective, '')), ''),
+    COALESCE(p_talking_points, '{}'),
+    COALESCE(p_questions, '{}'),
+    COALESCE(p_likely_objections, '{}'),
+    NULLIF(trim(COALESCE(p_next_step, '')), ''),
+    NULLIF(trim(COALESCE(p_after_call_prompt, '')), ''),
+    'active',
+    NULLIF(trim(COALESCE(p_model, '')), ''),
+    GREATEST(COALESCE(p_tokens_input, 0), 0),
+    GREATEST(COALESCE(p_tokens_output, 0), 0)
+  )
+  RETURNING * INTO v_plan;
+
+  UPDATE public.contact_call_plans
+  SET status = 'superseded',
+      superseded_by = v_plan.id
+  WHERE contact_id = p_contact_id
+    AND status = 'active'
+    AND id <> v_plan.id;
+
+  RETURN v_plan;
+END;
+$$;
+
 -- Best-effort backfill from the legacy contact follow-up fields. This preserves
 -- existing operator intent while moving the actual workflow into the timeline.
 INSERT INTO public.contact_activities (
@@ -1157,12 +1486,16 @@ WHERE coalesce(c.needs_follow_up, false)
   );
 
 GRANT EXECUTE ON FUNCTION public.create_contact_activity(uuid, text, text, text, text, text, text, timestamptz, timestamptz, uuid, text, jsonb, boolean) TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.create_file_contact_activity(uuid, text, text, text, text, text, bigint, jsonb) TO authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.complete_contact_follow_up(uuid) TO authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.update_contact_activity(uuid, text, text, timestamptz, text, text, jsonb) TO authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.delete_contact_activity(uuid) TO authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.get_contact_context_manifest(uuid) TO authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.get_contact_timeline(uuid, text, timestamptz, integer) TO authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.get_hot_leads_workbench(text, boolean, integer, integer) TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.get_active_contact_call_plan(uuid) TO authenticated, service_role;
+REVOKE EXECUTE ON FUNCTION public.replace_active_contact_call_plan(uuid, uuid, text, text, text, text, text[], text[], text[], text, text, text, integer, integer) FROM PUBLIC, authenticated;
+GRANT EXECUTE ON FUNCTION public.replace_active_contact_call_plan(uuid, uuid, text, text, text, text, text[], text[], text[], text, text, text, integer, integer) TO service_role;
 
 COMMENT ON TABLE public.contact_activities IS
   'Canonical contact timeline for calls, follow-ups, notes, files, meetings, system, campaign, and email events.';
