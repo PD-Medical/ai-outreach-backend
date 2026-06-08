@@ -419,6 +419,14 @@ BEGIN
   IF p_file_size IS NOT NULL AND p_file_size < 0 THEN
     RAISE EXCEPTION 'file_size must be non-negative';
   END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM storage.objects obj
+    WHERE obj.bucket_id = 'crm-activity-attachments'
+      AND obj.name = trim(p_storage_path)
+  ) THEN
+    RAISE EXCEPTION 'uploaded file not found';
+  END IF;
 
   SELECT * INTO v_contact
   FROM public.contacts
@@ -839,11 +847,23 @@ $$;
 
 CREATE OR REPLACE FUNCTION public.get_contact_context_manifest(p_contact_id uuid)
 RETURNS jsonb
-LANGUAGE sql
+LANGUAGE plpgsql
 STABLE
 SECURITY DEFINER
 SET search_path = public
 AS $$
+#variable_conflict use_column
+DECLARE
+  v_actor uuid := public._contact_activity_actor();
+  v_manifest jsonb;
+BEGIN
+  IF v_actor IS NULL AND COALESCE(auth.role(), '') <> 'service_role' THEN
+    RAISE EXCEPTION 'authenticated user required';
+  END IF;
+  IF p_contact_id IS NULL THEN
+    RAISE EXCEPTION 'contact_id is required';
+  END IF;
+
   WITH conversation_stats AS (
     SELECT
       count(*)::int AS conversation_count,
@@ -947,7 +967,11 @@ AS $$
       )
     )
   )
+  INTO v_manifest
   FROM conversation_stats, activity_stats, attachment_stats, campaign_stats;
+
+  RETURN v_manifest;
+END;
 $$;
 
 DROP FUNCTION IF EXISTS public.get_contact_timeline(uuid, text, timestamptz, integer);
@@ -976,11 +1000,23 @@ RETURNS TABLE(
   has_revisions boolean,
   metadata jsonb
 )
-LANGUAGE sql
+LANGUAGE plpgsql
 STABLE
 SECURITY DEFINER
 SET search_path = public
 AS $$
+#variable_conflict use_column
+DECLARE
+  v_actor uuid := public._contact_activity_actor();
+BEGIN
+  IF v_actor IS NULL AND COALESCE(auth.role(), '') <> 'service_role' THEN
+    RAISE EXCEPTION 'authenticated user required';
+  END IF;
+  IF p_contact_id IS NULL THEN
+    RAISE EXCEPTION 'contact_id is required';
+  END IF;
+
+  RETURN QUERY
   WITH activity_rows AS (
     SELECT
       ca.id::text AS id,
@@ -1103,14 +1139,32 @@ AS $$
       AND (p_activity_type IS NULL OR p_activity_type = 'campaign')
       AND (p_cursor IS NULL OR ce.event_timestamp < p_cursor)
   )
-  SELECT *
+  SELECT
+    r.id,
+    r.source_type,
+    r.activity_type,
+    r.title,
+    r.body,
+    r.occurred_at,
+    r.due_at,
+    r.status,
+    r.priority,
+    r.direction,
+    r.author_name,
+    r.created_by,
+    r.can_edit,
+    r.can_delete,
+    r.edited_at,
+    r.has_revisions,
+    r.metadata
   FROM (
     SELECT * FROM activity_rows
     UNION ALL
     SELECT * FROM campaign_rows
-  ) rows
-  ORDER BY occurred_at DESC NULLS LAST
+  ) r
+  ORDER BY r.occurred_at DESC NULLS LAST
   LIMIT LEAST(GREATEST(COALESCE(p_limit, 50), 1), 100);
+END;
 $$;
 
 CREATE OR REPLACE FUNCTION public.get_hot_leads_workbench(
@@ -1144,11 +1198,20 @@ RETURNS TABLE(
   last_active_at timestamptz,
   total_count bigint
 )
-LANGUAGE sql
+LANGUAGE plpgsql
 STABLE
 SECURITY DEFINER
 SET search_path = public
 AS $$
+#variable_conflict use_column
+DECLARE
+  v_actor uuid := public._contact_activity_actor();
+BEGIN
+  IF v_actor IS NULL AND COALESCE(auth.role(), '') <> 'service_role' THEN
+    RAISE EXCEPTION 'authenticated user required';
+  END IF;
+
+  RETURN QUERY
   WITH campaign_scores AS (
     SELECT
       contact_id,
@@ -1298,37 +1361,38 @@ AS $$
     FROM scored
   )
   SELECT
-    contact_id,
-    email,
-    first_name,
-    last_name,
-    phone,
-    organization_id,
-    organization_name,
-    organization_state,
-    total_score,
-    campaign_score,
-    workflow_score,
-    tier,
-    reasons,
-    open_follow_up_count,
-    latest_activity,
-    engagement_summary,
-    engagement_summary_at,
-    engagement_action_items,
-    summary_stale,
-    latest_call_plan,
-    call_plan_stale,
-    NULLIF(last_active_at, '-infinity'::timestamptz) AS last_active_at,
+    fr.contact_id,
+    fr.email,
+    fr.first_name,
+    fr.last_name,
+    fr.phone,
+    fr.organization_id,
+    fr.organization_name,
+    fr.organization_state,
+    fr.total_score,
+    fr.campaign_score,
+    fr.workflow_score,
+    fr.tier,
+    fr.reasons,
+    fr.open_follow_up_count,
+    fr.latest_activity,
+    fr.engagement_summary,
+    fr.engagement_summary_at,
+    fr.engagement_action_items,
+    fr.summary_stale,
+    fr.latest_call_plan,
+    fr.call_plan_stale,
+    NULLIF(fr.last_active_at, '-infinity'::timestamptz) AS last_active_at,
     count(*) OVER () AS total_count
-  FROM final_rows
+  FROM final_rows fr
   ORDER BY
-    CASE WHEN open_follow_up_count > 0 THEN 0 ELSE 1 END,
-    coalesce(next_follow_up_at, 'infinity'::timestamptz),
-    total_score DESC,
-    last_active_at DESC
+    CASE WHEN fr.open_follow_up_count > 0 THEN 0 ELSE 1 END,
+    coalesce(fr.next_follow_up_at, 'infinity'::timestamptz),
+    fr.total_score DESC,
+    fr.last_active_at DESC
   LIMIT LEAST(GREATEST(COALESCE(p_page_size, 25), 1), 100)
   OFFSET GREATEST(COALESCE(p_page, 1) - 1, 0) * LEAST(GREATEST(COALESCE(p_page_size, 25), 1), 100);
+END;
 $$;
 
 CREATE OR REPLACE FUNCTION public.get_active_contact_call_plan(p_contact_id uuid)
@@ -1485,6 +1549,17 @@ WHERE coalesce(c.needs_follow_up, false)
       AND ca.source_type = 'legacy_follow_up'
   );
 
+REVOKE EXECUTE ON FUNCTION public.create_contact_activity(uuid, text, text, text, text, text, text, timestamptz, timestamptz, uuid, text, jsonb, boolean) FROM PUBLIC, anon;
+REVOKE EXECUTE ON FUNCTION public.create_file_contact_activity(uuid, text, text, text, text, text, bigint, jsonb) FROM PUBLIC, anon;
+REVOKE EXECUTE ON FUNCTION public.complete_contact_follow_up(uuid) FROM PUBLIC, anon;
+REVOKE EXECUTE ON FUNCTION public.update_contact_activity(uuid, text, text, timestamptz, text, text, jsonb) FROM PUBLIC, anon;
+REVOKE EXECUTE ON FUNCTION public.delete_contact_activity(uuid) FROM PUBLIC, anon;
+REVOKE EXECUTE ON FUNCTION public.get_contact_context_manifest(uuid) FROM PUBLIC, anon;
+REVOKE EXECUTE ON FUNCTION public.get_contact_timeline(uuid, text, timestamptz, integer) FROM PUBLIC, anon;
+REVOKE EXECUTE ON FUNCTION public.get_hot_leads_workbench(text, boolean, integer, integer) FROM PUBLIC, anon;
+REVOKE EXECUTE ON FUNCTION public.get_active_contact_call_plan(uuid) FROM PUBLIC, anon;
+REVOKE EXECUTE ON FUNCTION public.replace_active_contact_call_plan(uuid, uuid, text, text, text, text, text[], text[], text[], text, text, text, integer, integer) FROM PUBLIC, anon, authenticated;
+
 GRANT EXECUTE ON FUNCTION public.create_contact_activity(uuid, text, text, text, text, text, text, timestamptz, timestamptz, uuid, text, jsonb, boolean) TO authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.create_file_contact_activity(uuid, text, text, text, text, text, bigint, jsonb) TO authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.complete_contact_follow_up(uuid) TO authenticated, service_role;
@@ -1494,7 +1569,6 @@ GRANT EXECUTE ON FUNCTION public.get_contact_context_manifest(uuid) TO authentic
 GRANT EXECUTE ON FUNCTION public.get_contact_timeline(uuid, text, timestamptz, integer) TO authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.get_hot_leads_workbench(text, boolean, integer, integer) TO authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.get_active_contact_call_plan(uuid) TO authenticated, service_role;
-REVOKE EXECUTE ON FUNCTION public.replace_active_contact_call_plan(uuid, uuid, text, text, text, text, text[], text[], text[], text, text, text, integer, integer) FROM PUBLIC, authenticated;
 GRANT EXECUTE ON FUNCTION public.replace_active_contact_call_plan(uuid, uuid, text, text, text, text, text[], text[], text[], text, text, text, integer, integer) TO service_role;
 
 COMMENT ON TABLE public.contact_activities IS

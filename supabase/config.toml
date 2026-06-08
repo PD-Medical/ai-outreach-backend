@@ -50,6 +50,12 @@ verify_jwt = false
 [functions.email-agent-resume]
 verify_jwt = false
 
+[functions.contact-call-plan-invoke]
+verify_jwt = false
+
+[functions.contact-activity-attachment-download]
+verify_jwt = false
+
 [functions.email-import-job]
 verify_jwt = false
 
