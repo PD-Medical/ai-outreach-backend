@@ -2,13 +2,10 @@ import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.39.0';
 import { corsHeaders } from '../_shared/cors.ts';
 import { requireAdmin } from '../_shared/auth.ts';
-import {
-  getMailchimpNewsletterSyncWindowStatus,
-  scheduleRateToCron,
-} from '../_shared/mailchimp-newsletter-sync-window.ts';
+import { mailchimpEngagementScheduleRateToCron } from '../_shared/mailchimp-engagement.ts';
 
-const CRON_JOB_NAME = 'mailchimp-newsletter-sync';
-const DEFAULT_SCHEDULE_RATE = '30 minutes';
+const CRON_JOB_NAME = 'mailchimp-engagement-sync';
+const DEFAULT_SCHEDULE_RATE = '1 hour';
 const SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
 
 interface SchedulerRequest {
@@ -18,15 +15,12 @@ interface SchedulerRequest {
 
 function isServiceRoleRequest(req: Request): boolean {
   const authHeader = req.headers.get('authorization') ?? '';
-  if (!authHeader.startsWith('Bearer ')) return false;
-  return authHeader.replace('Bearer ', '') === SERVICE_ROLE_KEY;
+  return authHeader.startsWith('Bearer ') && authHeader.replace('Bearer ', '') === SERVICE_ROLE_KEY;
 }
 
 async function isCronJobEnabled(supabase: any): Promise<boolean> {
   const { data, error } = await supabase.rpc('check_cron_job_exists', { job_name: CRON_JOB_NAME });
-  if (error) {
-    throw new Error(`Failed to check cron job: ${error.message}`);
-  }
+  if (error) throw new Error(`Failed to check cron job: ${error.message}`);
   return Boolean(data);
 }
 
@@ -39,36 +33,32 @@ async function upsertSchedulerConfig(
     .from('system_config')
     .upsert([
       {
-        key: 'mailchimp_newsletter_sync_enabled',
+        key: 'mailchimp_engagement_sync_enabled',
         value: enabled,
-        description: 'Toggle scheduled sync of external Mailchimp newsletters.',
+        description: 'Toggle scheduled polling of Mailchimp campaign engagement reports.',
       },
       {
-        key: 'mailchimp_newsletter_sync_schedule_rate',
+        key: 'mailchimp_engagement_sync_schedule_rate',
         value: scheduleRate,
-        description: 'Schedule rate for syncing external Mailchimp newsletters.',
+        description: 'Schedule rate for polling Mailchimp campaign engagement reports.',
       },
     ], { onConflict: 'key' });
 
-  if (error) {
-    throw new Error(`Failed to update Mailchimp scheduler config: ${error.message}`);
-  }
+  if (error) throw new Error(`Failed to update Mailchimp engagement scheduler config: ${error.message}`);
 }
 
 async function enableCronJob(
   supabase: any,
   scheduleRate: string,
 ): Promise<void> {
-  const cronExpression = scheduleRateToCron(scheduleRate);
+  const cronExpression = mailchimpEngagementScheduleRateToCron(scheduleRate);
   const exists = await isCronJobEnabled(supabase);
 
   if (exists) {
     const { error } = await supabase.rpc('exec_sql', {
       sql: `SELECT cron.unschedule('${CRON_JOB_NAME}');`,
     });
-    if (error) {
-      throw new Error(`Failed to reset Mailchimp cron job: ${error.message}`);
-    }
+    if (error) throw new Error(`Failed to reset Mailchimp engagement cron job: ${error.message}`);
   }
 
   const scheduleSql = `
@@ -77,7 +67,7 @@ async function enableCronJob(
       '${cronExpression}',
       $$
       SELECT net.http_post(
-        url := current_setting('app.settings.supabase_url', true) || '/functions/v1/sync-mailchimp-newsletters',
+        url := current_setting('app.settings.supabase_url', true) || '/functions/v1/sync-mailchimp-engagement',
         headers := jsonb_build_object(
           'Content-Type', 'application/json',
           'Authorization', 'Bearer ' || current_setting('app.settings.service_role_key', true)
@@ -93,9 +83,7 @@ async function enableCronJob(
   `;
 
   const { error } = await supabase.rpc('exec_sql', { sql: scheduleSql });
-  if (error) {
-    throw new Error(`Failed to schedule Mailchimp sync job: ${error.message}`);
-  }
+  if (error) throw new Error(`Failed to schedule Mailchimp engagement sync job: ${error.message}`);
 }
 
 async function disableCronJob(supabase: any): Promise<void> {
@@ -105,9 +93,7 @@ async function disableCronJob(supabase: any): Promise<void> {
   const { error } = await supabase.rpc('exec_sql', {
     sql: `SELECT cron.unschedule('${CRON_JOB_NAME}');`,
   });
-  if (error) {
-    throw new Error(`Failed to disable Mailchimp sync job: ${error.message}`);
-  }
+  if (error) throw new Error(`Failed to disable Mailchimp engagement sync job: ${error.message}`);
 }
 
 async function getSchedulerStatus(supabase: any) {
@@ -115,19 +101,19 @@ async function getSchedulerStatus(supabase: any) {
     .from('system_config')
     .select('key, value')
     .in('key', [
-      'mailchimp_newsletter_sync_enabled',
-      'mailchimp_newsletter_sync_schedule_rate',
+      'mailchimp_engagement_sync_enabled',
+      'mailchimp_engagement_sync_schedule_rate',
+      'mailchimp_engagement_sync_lookback_days',
+      'mailchimp_engagement_sync_campaign_limit',
     ]);
 
-  if (configError) {
-    throw new Error(`Failed to load Mailchimp scheduler config: ${configError.message}`);
-  }
+  if (configError) throw new Error(`Failed to load Mailchimp engagement scheduler config: ${configError.message}`);
 
   const configEntries = (configRows ?? []) as Array<{ key: string; value: unknown }>;
   const configMap = new Map(configEntries.map((row) => [row.key, row.value]));
   const enabled = await isCronJobEnabled(supabase);
-  const configuredEnabled = Boolean(configMap.get('mailchimp_newsletter_sync_enabled') ?? false);
-  const scheduleRate = String(configMap.get('mailchimp_newsletter_sync_schedule_rate') ?? DEFAULT_SCHEDULE_RATE);
+  const configuredEnabled = Boolean(configMap.get('mailchimp_engagement_sync_enabled') ?? true);
+  const scheduleRate = String(configMap.get('mailchimp_engagement_sync_schedule_rate') ?? DEFAULT_SCHEDULE_RATE);
 
   const { data: jobData } = await supabase
     .from('cron.job')
@@ -143,12 +129,6 @@ async function getSchedulerStatus(supabase: any) {
     .order('start_time', { ascending: false })
     .limit(1)
     .maybeSingle();
-  const lastRun = lastRunData as {
-    start_time?: string | null;
-    end_time?: string | null;
-    status?: string | null;
-    return_message?: string | null;
-  } | null;
 
   return {
     enabled,
@@ -156,8 +136,9 @@ async function getSchedulerStatus(supabase: any) {
     schedule_rate: scheduleRate,
     cron_schedule: job?.schedule ?? null,
     job_name: CRON_JOB_NAME,
-    last_run: lastRun ?? null,
-    ...getMailchimpNewsletterSyncWindowStatus(),
+    lookback_days: Number(configMap.get('mailchimp_engagement_sync_lookback_days') ?? 7),
+    campaign_limit: Number(configMap.get('mailchimp_engagement_sync_campaign_limit') ?? 25),
+    last_run: lastRunData ?? null,
   };
 }
 
@@ -208,7 +189,7 @@ serve(async (req) => {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
   } catch (error) {
-    console.error('[MailchimpNewsletterSyncScheduler] Error:', error);
+    console.error('[MailchimpEngagementSyncScheduler] Error:', error);
     const message = error instanceof Error ? error.message : 'Unknown scheduler error';
     return new Response(JSON.stringify({ error: message }), {
       status: 500,
