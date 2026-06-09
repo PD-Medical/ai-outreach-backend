@@ -665,6 +665,20 @@ BEGIN
     FROM public.campaign_events next_campaign
     WHERE next_campaign.contact_id = v_activity.contact_id
       AND next_campaign.event_timestamp > v_activity.occurred_at
+  )
+  OR EXISTS (
+    SELECT 1
+    FROM public.emails next_email
+    WHERE (
+        next_email.contact_id = v_activity.contact_id
+        OR EXISTS (
+          SELECT 1
+          FROM public.conversations next_conv
+          WHERE next_conv.id = next_email.conversation_id
+            AND next_conv.primary_contact_id = v_activity.contact_id
+        )
+      )
+      AND next_email.received_at > v_activity.occurred_at
   ) THEN
     RAISE EXCEPTION 'activity can no longer be edited because newer timeline activity exists';
   END IF;
@@ -781,6 +795,20 @@ BEGIN
     FROM public.campaign_events next_campaign
     WHERE next_campaign.contact_id = v_activity.contact_id
       AND next_campaign.event_timestamp > v_activity.occurred_at
+  )
+  OR EXISTS (
+    SELECT 1
+    FROM public.emails next_email
+    WHERE (
+        next_email.contact_id = v_activity.contact_id
+        OR EXISTS (
+          SELECT 1
+          FROM public.conversations next_conv
+          WHERE next_conv.id = next_email.conversation_id
+            AND next_conv.primary_contact_id = v_activity.contact_id
+        )
+      )
+      AND next_email.received_at > v_activity.occurred_at
   ) THEN
     RAISE EXCEPTION 'activity can no longer be deleted because newer timeline activity exists';
   END IF;
