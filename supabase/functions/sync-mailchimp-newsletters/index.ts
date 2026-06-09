@@ -7,6 +7,10 @@ import {
   syncMailchimpCampaignToDb,
   syncRecentMailchimpCampaignsToDb,
 } from '../_shared/mailchimp-newsletters.ts';
+import {
+  getMailchimpNewsletterSyncWindowStatus,
+  isWithinMailchimpNewsletterSyncWindow,
+} from '../_shared/mailchimp-newsletter-sync-window.ts';
 
 interface SyncRequest {
   campaign_id?: string;
@@ -62,6 +66,20 @@ serve(async (req) => {
 
   try {
     const body: SyncRequest = req.method === 'POST' ? await req.json() : {};
+    const syncWindowStatus = getMailchimpNewsletterSyncWindowStatus();
+
+    if (body.source === 'pg_cron' && !isWithinMailchimpNewsletterSyncWindow()) {
+      return new Response(JSON.stringify({
+        ok: true,
+        skipped: true,
+        synced: 0,
+        skip_reason: 'outside_mailchimp_newsletter_sync_window',
+        ...syncWindowStatus,
+      }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
     const config = await getMailchimpSyncConfig(supabase);
 
     if (body.campaign_id) {
@@ -78,8 +96,10 @@ serve(async (req) => {
 
       return new Response(JSON.stringify({
         ok: true,
+        skipped: false,
         synced: 1,
         newsletters: [newsletter],
+        ...syncWindowStatus,
       }), {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
@@ -108,11 +128,13 @@ serve(async (req) => {
 
     return new Response(JSON.stringify({
       ok: true,
+      skipped: false,
       sent_since: sentSince,
       lookback_days: lookbackDays,
       limit,
       synced: newsletters.length,
       newsletters,
+      ...syncWindowStatus,
     }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
