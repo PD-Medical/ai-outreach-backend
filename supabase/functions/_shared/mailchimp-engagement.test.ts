@@ -28,6 +28,15 @@ Deno.test("mapMailchimpActivity maps report actions to local event types", () =>
   assertEquals(mapMailchimpActivity({ action: "unknown", timestamp: "2026-06-09T00:00:00Z" }), null);
 });
 
+Deno.test("mapMailchimpActivity requires stable activity timestamps", () => {
+  assertEquals(mapMailchimpActivity({ action: "open" }), null);
+  assertEquals(mapMailchimpActivity({ action: "open", timestamp: "not-a-date" }), null);
+  assertEquals(
+    mapMailchimpActivity({ action: "open", created_at: "2026-06-09T00:00:00Z" })?.timestamp,
+    "2026-06-09T00:00:00.000Z",
+  );
+});
+
 Deno.test("scoreMailchimpActivity scores first open once", () => {
   const state = createEmptyMailchimpScoringState();
   const first = mapMailchimpActivity({ action: "open", timestamp: "2026-06-09T00:00:00Z" })!;
@@ -167,10 +176,50 @@ Deno.test("resolveMailchimpContactBatch prefers Mailchimp links over contact fal
     { listId: "list-a", email: "fallback@example.com" },
   ]);
 
-  assertEquals(resolved.get("linked@example.com"), "linked-contact");
-  assertEquals(resolved.get("fallback@example.com"), "fallback-contact");
+  assertEquals(resolved.resolve({ listId: "list-a", email: "linked@example.com" }), "linked-contact");
+  assertEquals(resolved.resolve({ listId: "list-a", email: "fallback@example.com" }), "fallback-contact");
   assertEquals(calls[0], { table: "mailchimp_contact_links", emails: ["linked@example.com", "fallback@example.com"] });
-  assertEquals(calls[1], { table: "contacts", emails: ["fallback@example.com"] });
+  assertEquals(calls[1], { table: "contacts", emails: ["linked@example.com", "fallback@example.com"] });
+});
+
+Deno.test("resolveMailchimpContactBatch keeps Mailchimp list matches separate for the same email", async () => {
+  const supabase = {
+    from(table: string) {
+      const state: { listId?: string } = {};
+      return {
+        select() {
+          return this;
+        },
+        eq(_column: string, value: string) {
+          state.listId = value;
+          return this;
+        },
+        in(_column: string, values: string[]) {
+          if (table === "mailchimp_contact_links") {
+            return {
+              data: values.includes("shared@example.com")
+                ? [{ contact_id: `linked-${state.listId}`, email_address: "shared@example.com" }]
+                : [],
+              error: null,
+            };
+          }
+          return {
+            data: [{ id: "fallback-contact", email: "shared@example.com" }],
+            error: null,
+          };
+        },
+      };
+    },
+  };
+
+  const resolved = await resolveMailchimpContactBatch(supabase as any, [
+    { listId: "list-a", email: "shared@example.com" },
+    { listId: "list-b", email: "shared@example.com" },
+  ]);
+
+  assertEquals(resolved.resolve({ listId: "list-a", email: "shared@example.com" }), "linked-list-a");
+  assertEquals(resolved.resolve({ listId: "list-b", email: "shared@example.com" }), "linked-list-b");
+  assertEquals(resolved.resolve({ listId: null, email: "shared@example.com" }), "fallback-contact");
 });
 
 Deno.test("syncMailchimpEngagementForNewsletters dry-run polls without campaign bridge", async () => {
@@ -250,4 +299,128 @@ Deno.test("syncMailchimpEngagementForNewsletters dry-run polls without campaign 
   assertEquals(stats.summaries_updated, 0);
   assertEquals(stats.errors, []);
   assertEquals(writeTables, []);
+});
+
+Deno.test("syncMailchimpEngagementForNewsletters records real writes through atomic RPC", async () => {
+  const rpcCalls: Array<{ name: string; args: Record<string, unknown> }> = [];
+  const supabase = {
+    from(table: string) {
+      return {
+        select() {
+          return this;
+        },
+        eq() {
+          return this;
+        },
+        in(_column: string, values: string[]) {
+          if (table === "mailchimp_contact_links") {
+            return { data: [], error: null };
+          }
+          if (table === "contacts") {
+            return {
+              data: values.includes("person@example.com")
+                ? [{ id: "contact-1", email: "person@example.com" }]
+                : [],
+              error: null,
+            };
+          }
+          return { data: [], error: null };
+        },
+      };
+    },
+    rpc(name: string, args: Record<string, unknown>) {
+      rpcCalls.push({ name, args });
+      return { data: [{ status: "inserted" }], error: null };
+    },
+  };
+
+  const stats = await syncMailchimpEngagementForNewsletters(
+    supabase as any,
+    [{
+      id: "newsletter-1",
+      mailchimp_campaign_id: "mailchimp-campaign-1",
+      campaign_id: "11111111-1111-1111-1111-111111111111",
+      subject: "Real run campaign",
+      audience_id: "list-a",
+    }],
+    {
+      maxEmailsPerCampaign: 1,
+      fetchEmailActivityPage: async () => ({
+        emails: [{
+          email_id: "subscriber-hash",
+          email_address: "person@example.com",
+          list_id: "list-a",
+          activity: [{ action: "open", timestamp: "2026-06-09T00:00:00Z" }],
+        }],
+      }),
+    },
+  );
+
+  assertEquals(stats.events_inserted, 1);
+  assertEquals(stats.events_skipped_existing, 0);
+  assertEquals(stats.summaries_updated, 1);
+  assertEquals(rpcCalls.length, 1);
+  assertEquals(rpcCalls[0].name, "record_mailchimp_campaign_event");
+  assertEquals(rpcCalls[0].args.p_campaign_id, "11111111-1111-1111-1111-111111111111");
+  assertEquals(rpcCalls[0].args.p_contact_id, "contact-1");
+  assertEquals(rpcCalls[0].args.p_event_type, "opened");
+  assertEquals(rpcCalls[0].args.p_is_unique_click_score, false);
+});
+
+Deno.test("syncMailchimpEngagementForNewsletters does not update summary for duplicate RPC status", async () => {
+  const supabase = {
+    from(table: string) {
+      return {
+        select() {
+          return this;
+        },
+        eq() {
+          return this;
+        },
+        in(_column: string, values: string[]) {
+          if (table === "mailchimp_contact_links") {
+            return { data: [], error: null };
+          }
+          if (table === "contacts") {
+            return {
+              data: values.includes("person@example.com")
+                ? [{ id: "contact-1", email: "person@example.com" }]
+                : [],
+              error: null,
+            };
+          }
+          return { data: [], error: null };
+        },
+      };
+    },
+    rpc() {
+      return { data: [{ status: "skipped_existing" }], error: null };
+    },
+  };
+
+  const stats = await syncMailchimpEngagementForNewsletters(
+    supabase as any,
+    [{
+      id: "newsletter-1",
+      mailchimp_campaign_id: "mailchimp-campaign-1",
+      campaign_id: "11111111-1111-1111-1111-111111111111",
+      subject: "Duplicate campaign",
+      audience_id: "list-a",
+    }],
+    {
+      maxEmailsPerCampaign: 1,
+      fetchEmailActivityPage: async () => ({
+        emails: [{
+          email_id: "subscriber-hash",
+          email_address: "person@example.com",
+          list_id: "list-a",
+          activity: [{ action: "open", timestamp: "2026-06-09T00:00:00Z" }],
+        }],
+      }),
+    },
+  );
+
+  assertEquals(stats.events_inserted, 0);
+  assertEquals(stats.events_skipped_existing, 1);
+  assertEquals(stats.summaries_updated, 0);
 });

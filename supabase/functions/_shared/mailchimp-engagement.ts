@@ -91,6 +91,10 @@ interface MailchimpCampaignBridge {
   scoringKey: string;
 }
 
+interface MailchimpContactResolver {
+  resolve(row: { email: string; listId: string | null }): string | null;
+}
+
 interface MailchimpEngagementSyncOptions {
   dryRun?: boolean;
   maxEmailsPerCampaign?: number;
@@ -131,40 +135,42 @@ function normalizeUrl(url: string | null | undefined): string | null {
   return trimmed || null;
 }
 
-function activityTimestamp(activity: MailchimpActivityItem): string {
+function activityTimestamp(activity: MailchimpActivityItem): string | null {
   const candidate = activity.timestamp ?? activity.created_at;
   if (candidate && !Number.isNaN(new Date(candidate).getTime())) {
     return new Date(candidate).toISOString();
   }
-  return new Date().toISOString();
+  return null;
 }
 
 export function mapMailchimpActivity(activity: MailchimpActivityItem): MappedMailchimpActivity | null {
   const action = normalizeAction(activity.action ?? activity.type);
   if (!action) return null;
+  const timestamp = activityTimestamp(activity);
+  if (!timestamp) return null;
 
   if (action === 'sent' || action === 'send') {
-    return { action: 'sent', eventType: 'sent', timestamp: activityTimestamp(activity), url: null };
+    return { action: 'sent', eventType: 'sent', timestamp, url: null };
   }
 
   if (action === 'open' || action === 'opened') {
-    return { action: 'open', eventType: 'opened', timestamp: activityTimestamp(activity), url: null };
+    return { action: 'open', eventType: 'opened', timestamp, url: null };
   }
 
   if (action === 'click' || action === 'clicked') {
-    return { action: 'click', eventType: 'clicked', timestamp: activityTimestamp(activity), url: normalizeUrl(activity.url) };
+    return { action: 'click', eventType: 'clicked', timestamp, url: normalizeUrl(activity.url) };
   }
 
   if (action === 'bounce' || action === 'bounced' || action === 'hard_bounce' || action === 'soft_bounce') {
-    return { action: 'bounce', eventType: 'bounced', timestamp: activityTimestamp(activity), url: null };
+    return { action: 'bounce', eventType: 'bounced', timestamp, url: null };
   }
 
   if (action === 'unsub' || action === 'unsubscribe' || action === 'unsubscribed') {
-    return { action: 'unsub', eventType: 'complained', timestamp: activityTimestamp(activity), url: null };
+    return { action: 'unsub', eventType: 'complained', timestamp, url: null };
   }
 
   if (action === 'abuse' || action === 'complaint' || action === 'complained' || action === 'spam') {
-    return { action: 'abuse', eventType: 'complained', timestamp: activityTimestamp(activity), url: null };
+    return { action: 'abuse', eventType: 'complained', timestamp, url: null };
   }
 
   return null;
@@ -423,8 +429,9 @@ async function ensureMailchimpCampaign(
 export async function resolveMailchimpContactBatch(
   supabase: SupabaseClient,
   rows: Array<{ email: string; listId: string | null }>,
-): Promise<Map<string, string>> {
-  const result = new Map<string, string>();
+): Promise<MailchimpContactResolver> {
+  const mailchimpLinksByListEmail = new Map<string, string>();
+  const contactsByEmail = new Map<string, string>();
   const emailsByList = new Map<string, Set<string>>();
   const allEmails = new Set<string>();
 
@@ -454,28 +461,44 @@ export async function resolveMailchimpContactBatch(
 
     for (const link of (data ?? []) as Array<{ contact_id?: string; email_address?: string }>) {
       const email = normalizeMailchimpEmail(link.email_address);
-      if (email && link.contact_id) result.set(email, link.contact_id);
+      if (email && link.contact_id) {
+        mailchimpLinksByListEmail.set(mailchimpContactKey(listId, email), link.contact_id);
+      }
     }
   }
 
-  const remainingEmails = [...allEmails].filter((email) => !result.has(email));
-  if (remainingEmails.length === 0) return result;
+  const emailList = [...allEmails];
+  if (emailList.length > 0) {
+    const { data: contacts, error: contactError } = await supabase
+      .from('contacts')
+      .select('id, email')
+      .in('email', emailList);
 
-  const { data: contacts, error: contactError } = await supabase
-    .from('contacts')
-    .select('id, email')
-    .in('email', remainingEmails);
+    if (contactError) {
+      throw new Error(`Failed to batch resolve contacts by email: ${contactError.message}`);
+    }
 
-  if (contactError) {
-    throw new Error(`Failed to batch resolve contacts by email: ${contactError.message}`);
+    for (const contact of (contacts ?? []) as Array<{ id?: string; email?: string }>) {
+      const email = normalizeMailchimpEmail(contact.email);
+      if (email && contact.id && !contactsByEmail.has(email)) contactsByEmail.set(email, contact.id);
+    }
   }
 
-  for (const contact of (contacts ?? []) as Array<{ id?: string; email?: string }>) {
-    const email = normalizeMailchimpEmail(contact.email);
-    if (email && contact.id && !result.has(email)) result.set(email, contact.id);
-  }
+  return {
+    resolve(row) {
+      const email = normalizeMailchimpEmail(row.email);
+      if (!email) return null;
+      if (row.listId) {
+        const linkedContactId = mailchimpLinksByListEmail.get(mailchimpContactKey(row.listId, email));
+        if (linkedContactId) return linkedContactId;
+      }
+      return contactsByEmail.get(email) ?? null;
+    },
+  };
+}
 
-  return result;
+function mailchimpContactKey(listId: string, email: string): string {
+  return `${listId}\t${normalizeMailchimpEmail(email)}`;
 }
 
 async function eventExists(supabase: SupabaseClient, externalId: string): Promise<boolean> {
@@ -527,94 +550,7 @@ async function loadScoringState(
   return state;
 }
 
-async function updateCampaignSummary(
-  supabase: SupabaseClient,
-  input: {
-    campaignId: string;
-    contactId: string;
-    email: string;
-    eventType: CampaignEventType;
-    scoreDelta: number;
-    eventTimestamp: string;
-    isUniqueClickScore: boolean;
-  },
-): Promise<void> {
-  const { data: existing, error: fetchError } = await supabase
-    .from('campaign_contact_summary')
-    .select('*')
-    .eq('campaign_id', input.campaignId)
-    .eq('contact_id', input.contactId)
-    .maybeSingle();
-
-  if (fetchError) throw new Error(`Failed to load campaign summary: ${fetchError.message}`);
-
-  const base = existing ?? {};
-  const emailsSent = Number(base.emails_sent ?? 0) + (input.eventType === 'sent' ? 1 : 0);
-  const emailsOpened = Number(base.emails_opened ?? 0) + (input.eventType === 'opened' ? 1 : 0);
-  const emailsClicked = Number(base.emails_clicked ?? 0) + (input.eventType === 'clicked' ? 1 : 0);
-  const emailsBounced = Number(base.emails_bounced ?? 0) + (input.eventType === 'bounced' ? 1 : 0);
-  const uniqueClicks = Number(base.unique_clicks ?? 0) + (input.eventType === 'clicked' && input.isUniqueClickScore ? 1 : 0);
-
-  let firstOpenedAt = base.first_opened_at ?? null;
-  let lastOpenedAt = base.last_opened_at ?? null;
-  let firstClickedAt = base.first_clicked_at ?? null;
-  let lastClickedAt = base.last_clicked_at ?? null;
-
-  if (input.eventType === 'opened') {
-    firstOpenedAt = firstOpenedAt ?? input.eventTimestamp;
-    lastOpenedAt = input.eventTimestamp;
-  }
-
-  if (input.eventType === 'clicked') {
-    firstClickedAt = firstClickedAt ?? input.eventTimestamp;
-    lastClickedAt = input.eventTimestamp;
-  }
-
-  const payload = {
-    email: input.email,
-    total_score: Number(base.total_score ?? 0) + input.scoreDelta,
-    opened: emailsOpened > 0,
-    clicked: emailsClicked > 0,
-    converted: Boolean(base.converted ?? false),
-    first_event_at: base.first_event_at ?? input.eventTimestamp,
-    last_event_at: input.eventTimestamp,
-    emails_sent: emailsSent,
-    emails_delivered: Number(base.emails_delivered ?? 0),
-    emails_opened: emailsOpened,
-    emails_clicked: emailsClicked,
-    emails_bounced: emailsBounced,
-    emails_replied: Number(base.emails_replied ?? 0),
-    unique_clicks: uniqueClicks,
-    first_opened_at: firstOpenedAt,
-    last_opened_at: lastOpenedAt,
-    first_clicked_at: firstClickedAt,
-    last_clicked_at: lastClickedAt,
-    workflow_emails_sent: Number(base.workflow_emails_sent ?? 0),
-    workflow_emails_opened: Number(base.workflow_emails_opened ?? 0),
-    workflow_emails_clicked: Number(base.workflow_emails_clicked ?? 0),
-  };
-
-  if (existing) {
-    const { error } = await supabase
-      .from('campaign_contact_summary')
-      .update(payload)
-      .eq('campaign_id', input.campaignId)
-      .eq('contact_id', input.contactId);
-    if (error) throw new Error(`Failed to update campaign summary: ${error.message}`);
-    return;
-  }
-
-  const { error } = await supabase
-    .from('campaign_contact_summary')
-    .insert({
-      campaign_id: input.campaignId,
-      contact_id: input.contactId,
-      ...payload,
-    });
-  if (error) throw new Error(`Failed to insert campaign summary: ${error.message}`);
-}
-
-async function insertCampaignEvent(
+async function recordMailchimpCampaignEvent(
   supabase: SupabaseClient,
   input: {
     campaignId: string;
@@ -629,21 +565,19 @@ async function insertCampaignEvent(
     dryRun: boolean;
   },
 ): Promise<'inserted' | 'skipped_existing'> {
-  if (await eventExists(supabase, input.externalId)) {
-    return 'skipped_existing';
+  if (input.dryRun) {
+    return await eventExists(supabase, input.externalId) ? 'skipped_existing' : 'inserted';
   }
 
-  if (input.dryRun) return 'inserted';
-
-  const { error } = await supabase.from('campaign_events').insert({
-    campaign_id: input.campaignId,
-    contact_id: input.contactId,
-    email: input.email,
-    event_type: input.mapped.eventType,
-    event_timestamp: input.mapped.timestamp,
-    score: input.score.score,
-    external_id: input.externalId,
-    source: {
+  const { data, error } = await supabase.rpc('record_mailchimp_campaign_event', {
+    p_campaign_id: input.campaignId,
+    p_contact_id: input.contactId,
+    p_email: input.email,
+    p_event_type: input.mapped.eventType,
+    p_event_timestamp: input.mapped.timestamp,
+    p_score: input.score.score,
+    p_external_id: input.externalId,
+    p_source: {
       provider: 'mailchimp',
       mailchimp_campaign_id: input.newsletter.mailchimp_campaign_id,
       mailchimp_newsletter_id: input.newsletter.id,
@@ -654,11 +588,15 @@ async function insertCampaignEvent(
       scoring_rule: input.score.scoringRule,
       raw_activity: input.rawActivity,
     },
+    p_is_unique_click_score: input.mapped.eventType === 'clicked' && input.score.score > 0,
   });
 
-  if ((error as { code?: string } | null)?.code === '23505') return 'skipped_existing';
-  if (error) throw new Error(`Failed to insert Mailchimp campaign event: ${error.message}`);
-  return 'inserted';
+  if (error) throw new Error(`Failed to record Mailchimp campaign event: ${error.message}`);
+
+  const row = Array.isArray(data) ? data[0] : data;
+  const status = (row as { status?: string } | null)?.status;
+  if (status === 'inserted' || status === 'skipped_existing') return status;
+  throw new Error('Mailchimp campaign event RPC returned an unknown status');
 }
 
 export async function syncMailchimpEngagementForNewsletters(
@@ -718,9 +656,9 @@ export async function syncMailchimpEngagementForNewsletters(
           })
           .filter((row): row is PreparedMailchimpActivityRow => Boolean(row));
 
-        let contactIdsByEmail: Map<string, string>;
+        let contactResolver: MailchimpContactResolver;
         try {
-          contactIdsByEmail = await resolveMailchimpContactBatch(supabase, preparedRows);
+          contactResolver = await resolveMailchimpContactBatch(supabase, preparedRows);
         } catch (error) {
           stats.errors.push({
             campaign_id: newsletter.mailchimp_campaign_id,
@@ -733,7 +671,7 @@ export async function syncMailchimpEngagementForNewsletters(
         }
 
         for (const row of preparedRows) {
-          const contactId = contactIdsByEmail.get(row.email) ?? null;
+          const contactId = contactResolver.resolve(row);
           const recipientKey = `${row.listId ?? ''}:${row.email}`;
 
           if (!contactId) {
@@ -771,7 +709,7 @@ export async function syncMailchimpEngagementForNewsletters(
             });
 
             try {
-              const status = await insertCampaignEvent(supabase, {
+              const status = await recordMailchimpCampaignEvent(supabase, {
                 campaignId: bridge.campaignId ?? '00000000-0000-0000-0000-000000000000',
                 contactId,
                 email: row.email,
@@ -793,15 +731,6 @@ export async function syncMailchimpEngagementForNewsletters(
               applyMailchimpScoreToState(mapped, score.score, scoringState);
 
               if (!options.dryRun && bridge.campaignId) {
-                await updateCampaignSummary(supabase, {
-                  campaignId: bridge.campaignId,
-                  contactId,
-                  email: row.email,
-                  eventType: mapped.eventType,
-                  scoreDelta: score.score,
-                  eventTimestamp: mapped.timestamp,
-                  isUniqueClickScore: mapped.eventType === 'clicked' && score.score > 0,
-                });
                 stats.summaries_updated += 1;
               }
             } catch (error) {
