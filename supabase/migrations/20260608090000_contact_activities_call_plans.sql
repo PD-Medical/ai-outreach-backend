@@ -890,7 +890,6 @@ BEGIN
           'direction', direction,
           'due_at', due_at,
           'completed_at', completed_at,
-          'deleted_at', deleted_at,
           'updated_at', updated_at,
           'metadata', metadata
         )
@@ -898,6 +897,7 @@ BEGIN
       )::text, '[]')) AS activity_fingerprint
     FROM public.contact_activities
     WHERE contact_id = p_contact_id
+      AND deleted_at IS NULL
   ),
   attachment_stats AS (
     SELECT
@@ -917,6 +917,7 @@ BEGIN
     FROM public.contact_activity_attachments a
     JOIN public.contact_activities ca ON ca.id = a.activity_id
     WHERE ca.contact_id = p_contact_id
+      AND ca.deleted_at IS NULL
   ),
   campaign_stats AS (
     SELECT
@@ -1102,6 +1103,20 @@ BEGIN
           WHERE next_campaign.contact_id = ca.contact_id
             AND next_campaign.event_timestamp > ca.occurred_at
         )
+        OR EXISTS (
+          SELECT 1
+          FROM public.emails next_email
+          WHERE (
+              next_email.contact_id = ca.contact_id
+              OR EXISTS (
+                SELECT 1
+                FROM public.conversations next_conv
+                WHERE next_conv.id = next_email.conversation_id
+                  AND next_conv.primary_contact_id = ca.contact_id
+              )
+            )
+            AND next_email.received_at > ca.occurred_at
+        )
       ) AS has_next_activity
     ) lock_state ON true
     WHERE ca.contact_id = p_contact_id
@@ -1138,6 +1153,57 @@ BEGIN
     WHERE ce.contact_id = p_contact_id
       AND (p_activity_type IS NULL OR p_activity_type = 'campaign')
       AND (p_cursor IS NULL OR ce.event_timestamp < p_cursor)
+  ),
+  email_rows AS (
+    SELECT
+      e.id::text AS id,
+      'email'::text AS source_type,
+      'email'::text AS activity_type,
+      coalesce(
+        nullif(e.subject, '')::text,
+        CASE
+          WHEN e.direction IN ('outgoing', 'outbound', 'sent') THEN 'Email sent'
+          ELSE 'Email received'
+        END
+      ) AS title,
+      left(coalesce(nullif(e.body_clean, ''), nullif(e.body_plain, ''), ''), 1200) AS body,
+      e.received_at AS occurred_at,
+      NULL::timestamptz AS due_at,
+      'completed'::text AS status,
+      'medium'::text AS priority,
+      e.direction::text AS direction,
+      CASE
+        WHEN e.direction IN ('outgoing', 'outbound', 'sent') THEN 'PD Medical'
+        ELSE coalesce(nullif(e.from_name, '')::text, nullif(e.from_email, '')::text, 'External contact')
+      END AS author_name,
+      NULL::uuid AS created_by,
+      false AS can_edit,
+      false AS can_delete,
+      NULL::timestamptz AS edited_at,
+      false AS has_revisions,
+      jsonb_build_object(
+        'email_id', e.id,
+        'conversation_id', e.conversation_id,
+        'subject', e.subject,
+        'from_email', e.from_email,
+        'from_name', e.from_name,
+        'to_emails', e.to_emails,
+        'cc_emails', e.cc_emails,
+        'bcc_emails', e.bcc_emails,
+        'is_internal', e.is_internal
+      ) AS metadata
+    FROM public.emails e
+    WHERE (
+        e.contact_id = p_contact_id
+        OR EXISTS (
+          SELECT 1
+          FROM public.conversations conv
+          WHERE conv.id = e.conversation_id
+            AND conv.primary_contact_id = p_contact_id
+        )
+      )
+      AND (p_activity_type IS NULL OR p_activity_type = 'email')
+      AND (p_cursor IS NULL OR e.received_at < p_cursor)
   )
   SELECT
     r.id,
@@ -1161,8 +1227,10 @@ BEGIN
     SELECT * FROM activity_rows
     UNION ALL
     SELECT * FROM campaign_rows
+    UNION ALL
+    SELECT * FROM email_rows
   ) r
-  ORDER BY r.occurred_at DESC NULLS LAST
+  ORDER BY r.occurred_at DESC NULLS LAST, r.id DESC
   LIMIT LEAST(GREATEST(COALESCE(p_limit, 50), 1), 100);
 END;
 $$;

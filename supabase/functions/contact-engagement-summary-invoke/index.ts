@@ -18,7 +18,6 @@
  *   }
  *
  * Auth: requireAuth + RLS-filtered contact existence check.
- *       force=true requires requireAdmin (privileged: re-spends LLM budget).
  *       Per-user rate limit: 10 summary requests / minute.
  *
  * Timeout: 60s on the Lambda fetch — surfaces a 504 to the frontend rather
@@ -28,7 +27,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders } from "../_shared/cors.ts";
-import { requireAuth, requireAdmin } from "../_shared/auth.ts";
+import { requireAuth } from "../_shared/auth.ts";
 
 interface InvokeRequest {
   contact_id: string;
@@ -74,7 +73,7 @@ serve(async (req) => {
     }
 
     const force = !!body.force;
-    const auth = force ? await requireAdmin(req) : await requireAuth(req);
+    const auth = await requireAuth(req);
     if (auth instanceof Response) return auth;
     const { user } = auth;
 
