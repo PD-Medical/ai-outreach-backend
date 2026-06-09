@@ -5,7 +5,9 @@ import {
   createEmptyMailchimpScoringState,
   mailchimpEngagementScheduleRateToCron,
   mapMailchimpActivity,
+  resolveMailchimpContactBatch,
   scoreMailchimpActivity,
+  syncMailchimpEngagementForNewsletters,
 } from "./mailchimp-engagement.ts";
 
 Deno.test("mailchimpEngagementScheduleRateToCron maps supported rates", () => {
@@ -76,24 +78,176 @@ Deno.test("scoreMailchimpActivity scores negative actions once", () => {
   assertEquals(scoreMailchimpActivity(abuse, state).score, -30);
 });
 
-Deno.test("buildMailchimpEngagementExternalId is deterministic and normalizes email", () => {
-  const first = buildMailchimpEngagementExternalId({
+Deno.test("buildMailchimpEngagementExternalId is deterministic and normalizes email", async () => {
+  const first = await buildMailchimpEngagementExternalId({
     campaignId: "abc123",
     email: " Person@Example.COM ",
+    emailId: null,
     action: "click",
     timestamp: "2026-06-09T00:00:00.000Z",
     url: "https://example.com/a?x=1",
-    index: 4,
   });
-  const second = buildMailchimpEngagementExternalId({
+  const second = await buildMailchimpEngagementExternalId({
     campaignId: "abc123",
     email: "person@example.com",
+    emailId: null,
     action: "click",
     timestamp: "2026-06-09T00:00:00.000Z",
     url: "https://example.com/a?x=1",
-    index: 4,
   });
 
   assertEquals(first, second);
   assertEquals(first, "mailchimp:abc123:person%40example.com:click:2026-06-09T00%3A00%3A00.000Z:https%3A%2F%2Fexample.com%2Fa%3Fx%3D1");
+});
+
+Deno.test("buildMailchimpEngagementExternalId does not depend on array index for open events", async () => {
+  const first = await buildMailchimpEngagementExternalId({
+    campaignId: "abc123",
+    email: "person@example.com",
+    emailId: "subscriber-hash",
+    action: "open",
+    timestamp: "2026-06-09T00:00:00.000Z",
+    activity: { action: "open", timestamp: "2026-06-09T00:00:00.000Z", ip: "127.0.0.1" },
+  });
+  const second = await buildMailchimpEngagementExternalId({
+    campaignId: "abc123",
+    email: "person@example.com",
+    emailId: "subscriber-hash",
+    action: "open",
+    timestamp: "2026-06-09T00:00:00.000Z",
+    activity: { timestamp: "2026-06-09T00:00:00.000Z", ip: "127.0.0.1", action: "open" },
+  });
+  const later = await buildMailchimpEngagementExternalId({
+    campaignId: "abc123",
+    email: "person@example.com",
+    emailId: "subscriber-hash",
+    action: "open",
+    timestamp: "2026-06-09T00:01:00.000Z",
+    activity: { action: "open", timestamp: "2026-06-09T00:01:00.000Z", ip: "127.0.0.1" },
+  });
+
+  assertEquals(first, second);
+  assertEquals(first === later, false);
+});
+
+Deno.test("resolveMailchimpContactBatch prefers Mailchimp links over contact fallback", async () => {
+  const calls: Array<{ table: string; emails: string[] }> = [];
+  const supabase = {
+    from(table: string) {
+      const state: { listId?: string; emails: string[] } = { emails: [] };
+      return {
+        select() {
+          return this;
+        },
+        eq(_column: string, value: string) {
+          state.listId = value;
+          return this;
+        },
+        in(_column: string, values: string[]) {
+          calls.push({ table, emails: values });
+          if (table === "mailchimp_contact_links") {
+            return {
+              data: state.listId === "list-a"
+                ? [{ contact_id: "linked-contact", email_address: "linked@example.com" }]
+                : [],
+              error: null,
+            };
+          }
+          return {
+            data: [{ id: "fallback-contact", email: "fallback@example.com" }],
+            error: null,
+          };
+        },
+      };
+    },
+  };
+
+  const resolved = await resolveMailchimpContactBatch(supabase as any, [
+    { listId: "list-a", email: "linked@example.com" },
+    { listId: "list-a", email: "fallback@example.com" },
+  ]);
+
+  assertEquals(resolved.get("linked@example.com"), "linked-contact");
+  assertEquals(resolved.get("fallback@example.com"), "fallback-contact");
+  assertEquals(calls[0], { table: "mailchimp_contact_links", emails: ["linked@example.com", "fallback@example.com"] });
+  assertEquals(calls[1], { table: "contacts", emails: ["fallback@example.com"] });
+});
+
+Deno.test("syncMailchimpEngagementForNewsletters dry-run polls without campaign bridge", async () => {
+  const writeTables: string[] = [];
+  const supabase = {
+    from(table: string) {
+      return {
+        select() {
+          return this;
+        },
+        eq() {
+          return this;
+        },
+        in(_column: string, values: string[]) {
+          if (table === "mailchimp_contact_links") {
+            return { data: [], error: null };
+          }
+          if (table === "contacts") {
+            return {
+              data: values.includes("person@example.com")
+                ? [{ id: "contact-1", email: "person@example.com" }]
+                : [],
+              error: null,
+            };
+          }
+          return { data: [], error: null };
+        },
+        maybeSingle() {
+          return { data: null, error: null };
+        },
+        insert() {
+          writeTables.push(table);
+          throw new Error(`unexpected insert into ${table}`);
+        },
+        update() {
+          writeTables.push(table);
+          throw new Error(`unexpected update to ${table}`);
+        },
+      };
+    },
+  };
+
+  const stats = await syncMailchimpEngagementForNewsletters(
+    supabase as any,
+    [{
+      id: "newsletter-1",
+      mailchimp_campaign_id: "mailchimp-campaign-1",
+      campaign_id: null,
+      subject: "Dry run campaign",
+      audience_id: "list-a",
+    }],
+    {
+      dryRun: true,
+      maxEmailsPerCampaign: 1,
+      fetchEmailActivityPage: async (campaignId, count, offset) => {
+        assertEquals(campaignId, "mailchimp-campaign-1");
+        assertEquals(count, 1);
+        assertEquals(offset, 0);
+        return {
+          emails: [{
+            email_id: "subscriber-hash",
+            email_address: "person@example.com",
+            list_id: "list-a",
+            activity: [{ action: "open", timestamp: "2026-06-09T00:00:00Z" }],
+          }],
+        };
+      },
+    },
+  );
+
+  assertEquals(stats.campaigns_scanned, 1);
+  assertEquals(stats.activities_scanned, 1);
+  assertEquals(stats.events_inserted, 1);
+  assertEquals(stats.events_skipped_existing, 0);
+  assertEquals(stats.contacts_matched, 1);
+  assertEquals(stats.contacts_missing, 0);
+  assertEquals(stats.summaries_updated, 0);
+  assertEquals(stats.errors, []);
+  assertEquals(writeTables, []);
 });

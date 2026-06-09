@@ -74,6 +74,33 @@ export interface MailchimpActivityScore {
   scoringRule: string;
 }
 
+interface MailchimpActivityWithMapping {
+  activity: MailchimpActivityItem;
+  mapped: MappedMailchimpActivity;
+}
+
+interface PreparedMailchimpActivityRow {
+  email: string;
+  emailId: string | null;
+  listId: string | null;
+  mappedActivities: MailchimpActivityWithMapping[];
+}
+
+interface MailchimpCampaignBridge {
+  campaignId: string | null;
+  scoringKey: string;
+}
+
+interface MailchimpEngagementSyncOptions {
+  dryRun?: boolean;
+  maxEmailsPerCampaign?: number;
+  fetchEmailActivityPage?: (
+    campaignId: string,
+    count: number,
+    offset: number,
+  ) => Promise<MailchimpEmailActivityResponse>;
+}
+
 export function mailchimpEngagementScheduleRateToCron(scheduleRate: string): string {
   switch (scheduleRate) {
     case '15 minutes':
@@ -219,22 +246,54 @@ export function applyMailchimpScoreToState(
   }
 }
 
-export function buildMailchimpEngagementExternalId(input: {
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableJson(item)).join(',')}]`;
+  }
+  if (value && typeof value === 'object') {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${stableJson(entry)}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+async function shortSha256(input: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input));
+  return Array.from(new Uint8Array(digest))
+    .slice(0, 8)
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+export async function buildMailchimpEngagementExternalId(input: {
   campaignId: string;
   email: string;
+  emailId?: string | null;
   action: string;
   timestamp: string;
   url?: string | null;
-  index: number;
-}): string {
-  const urlOrIndex = input.url ? encodeURIComponent(input.url) : `idx-${input.index}`;
+  activity?: MailchimpActivityItem | null;
+}): Promise<string> {
+  const recipient = input.emailId?.trim() || normalizeMailchimpEmail(input.email);
+  const urlOrActivityHash = input.url
+    ? encodeURIComponent(input.url)
+    : `hash-${await shortSha256(stableJson({
+      action: input.action,
+      timestamp: input.timestamp,
+      url: input.url ?? null,
+      ip: input.activity?.ip ?? null,
+      raw_activity: input.activity ?? null,
+    }))}`;
+
   return [
     'mailchimp',
     encodeURIComponent(input.campaignId),
-    encodeURIComponent(normalizeMailchimpEmail(input.email)),
+    encodeURIComponent(recipient),
     encodeURIComponent(input.action),
     encodeURIComponent(input.timestamp),
-    urlOrIndex,
+    urlOrActivityHash,
   ].join(':');
 }
 
@@ -273,8 +332,13 @@ async function ensureMailchimpCampaign(
   supabase: SupabaseClient,
   newsletter: MailchimpNewsletterForEngagement,
   dryRun: boolean,
-): Promise<string | null> {
-  if (newsletter.campaign_id) return newsletter.campaign_id;
+): Promise<MailchimpCampaignBridge> {
+  if (newsletter.campaign_id) {
+    return {
+      campaignId: newsletter.campaign_id,
+      scoringKey: newsletter.campaign_id,
+    };
+  }
 
   const { data: existing, error: existingError } = await supabase
     .from('campaigns')
@@ -295,10 +359,18 @@ async function ensureMailchimpCampaign(
         .eq('id', newsletter.id);
       if (linkError) throw new Error(`Failed to link Mailchimp newsletter to campaign: ${linkError.message}`);
     }
-    return existing.id;
+    return {
+      campaignId: existing.id,
+      scoringKey: existing.id,
+    };
   }
 
-  if (dryRun) return null;
+  if (dryRun) {
+    return {
+      campaignId: null,
+      scoringKey: `dry-run:${newsletter.mailchimp_campaign_id}`,
+    };
+  }
 
   const { data: inserted, error: insertError } = await supabase
     .from('campaigns')
@@ -321,7 +393,17 @@ async function ensureMailchimpCampaign(
         .eq('provider', 'mailchimp')
         .eq('external_id', newsletter.mailchimp_campaign_id)
         .maybeSingle();
-      if (raced?.id) return raced.id;
+      if (raced?.id) {
+        const { error: linkError } = await supabase
+          .from('mailchimp_newsletters')
+          .update({ campaign_id: raced.id, updated_at: new Date().toISOString() })
+          .eq('id', newsletter.id);
+        if (linkError) throw new Error(`Failed to link Mailchimp newsletter to raced campaign bridge: ${linkError.message}`);
+        return {
+          campaignId: raced.id,
+          scoringKey: raced.id,
+        };
+      }
     }
     throw new Error(`Failed to create Mailchimp campaign bridge: ${insertError?.message}`);
   }
@@ -332,43 +414,68 @@ async function ensureMailchimpCampaign(
     .eq('id', newsletter.id);
   if (updateError) throw new Error(`Failed to link Mailchimp newsletter to campaign: ${updateError.message}`);
 
-  return inserted.id;
+  return {
+    campaignId: inserted.id,
+    scoringKey: inserted.id,
+  };
 }
 
-async function resolveContactId(
+export async function resolveMailchimpContactBatch(
   supabase: SupabaseClient,
-  listId: string | null,
-  email: string,
-): Promise<string | null> {
-  const normalized = normalizeMailchimpEmail(email);
-  if (!normalized) return null;
+  rows: Array<{ email: string; listId: string | null }>,
+): Promise<Map<string, string>> {
+  const result = new Map<string, string>();
+  const emailsByList = new Map<string, Set<string>>();
+  const allEmails = new Set<string>();
 
-  if (listId) {
-    const { data: link, error: linkError } = await supabase
+  for (const row of rows) {
+    const email = normalizeMailchimpEmail(row.email);
+    if (!email) continue;
+    allEmails.add(email);
+    if (!row.listId) continue;
+    const existing = emailsByList.get(row.listId) ?? new Set<string>();
+    existing.add(email);
+    emailsByList.set(row.listId, existing);
+  }
+
+  for (const [listId, emails] of emailsByList.entries()) {
+    const emailList = [...emails];
+    if (emailList.length === 0) continue;
+
+    const { data, error } = await supabase
       .from('mailchimp_contact_links')
-      .select('contact_id')
+      .select('contact_id, email_address')
       .eq('list_id', listId)
-      .eq('email_address', normalized)
-      .maybeSingle();
+      .in('email_address', emailList);
 
-    if (linkError) {
-      throw new Error(`Failed to resolve Mailchimp contact link: ${linkError.message}`);
+    if (error) {
+      throw new Error(`Failed to batch resolve Mailchimp contact links: ${error.message}`);
     }
 
-    if (link?.contact_id) return link.contact_id;
+    for (const link of (data ?? []) as Array<{ contact_id?: string; email_address?: string }>) {
+      const email = normalizeMailchimpEmail(link.email_address);
+      if (email && link.contact_id) result.set(email, link.contact_id);
+    }
   }
 
-  const { data: contact, error: contactError } = await supabase
+  const remainingEmails = [...allEmails].filter((email) => !result.has(email));
+  if (remainingEmails.length === 0) return result;
+
+  const { data: contacts, error: contactError } = await supabase
     .from('contacts')
-    .select('id')
-    .eq('email', normalized)
-    .maybeSingle();
+    .select('id, email')
+    .in('email', remainingEmails);
 
   if (contactError) {
-    throw new Error(`Failed to resolve contact by email: ${contactError.message}`);
+    throw new Error(`Failed to batch resolve contacts by email: ${contactError.message}`);
   }
 
-  return contact?.id ?? null;
+  for (const contact of (contacts ?? []) as Array<{ id?: string; email?: string }>) {
+    const email = normalizeMailchimpEmail(contact.email);
+    if (email && contact.id && !result.has(email)) result.set(email, contact.id);
+  }
+
+  return result;
 }
 
 async function eventExists(supabase: SupabaseClient, externalId: string): Promise<boolean> {
@@ -557,7 +664,7 @@ async function insertCampaignEvent(
 export async function syncMailchimpEngagementForNewsletters(
   supabase: SupabaseClient,
   newsletters: MailchimpNewsletterForEngagement[],
-  options: { dryRun?: boolean; maxEmailsPerCampaign?: number } = {},
+  options: MailchimpEngagementSyncOptions = {},
 ): Promise<MailchimpEngagementStats> {
   const stats: MailchimpEngagementStats = {
     campaigns_scanned: 0,
@@ -571,107 +678,145 @@ export async function syncMailchimpEngagementForNewsletters(
   };
 
   const stateCache = new Map<string, MailchimpScoringState>();
+  const matchedRecipients = new Set<string>();
+  const missingRecipients = new Set<string>();
 
   for (const newsletter of newsletters) {
     try {
       stats.campaigns_scanned += 1;
-      const campaignId = await ensureMailchimpCampaign(supabase, newsletter, Boolean(options.dryRun));
-      if (!campaignId) continue;
+      const bridge = await ensureMailchimpCampaign(supabase, newsletter, Boolean(options.dryRun));
+      const maxEmails = Math.max(1, options.maxEmailsPerCampaign ?? 10000);
+      const pageSize = 1000;
+      let offset = 0;
+      let processedEmails = 0;
+      const fetchPage = options.fetchEmailActivityPage ?? fetchMailchimpEmailActivityPage;
 
-      const emails = await fetchAllMailchimpEmailActivity(
-        newsletter.mailchimp_campaign_id,
-        options.maxEmailsPerCampaign ?? 10000,
-      );
+      while (processedEmails < maxEmails) {
+        const count = Math.min(pageSize, maxEmails - processedEmails);
+        const page = await fetchPage(newsletter.mailchimp_campaign_id, count, offset);
+        const rawRows = page.emails ?? [];
+        if (rawRows.length === 0) break;
 
-      for (const row of emails) {
-        const email = normalizeMailchimpEmail(row.email_address);
-        if (!email) continue;
+        const preparedRows: PreparedMailchimpActivityRow[] = rawRows
+          .map((row) => {
+            const email = normalizeMailchimpEmail(row.email_address);
+            if (!email) return null;
 
-        const mappedActivities = (row.activity ?? [])
-          .map((activity, index) => ({ activity, mapped: mapMailchimpActivity(activity), index }))
-          .filter((item): item is { activity: MailchimpActivityItem; mapped: MappedMailchimpActivity; index: number } => Boolean(item.mapped));
-        stats.activities_scanned += mappedActivities.length;
-        if (mappedActivities.length === 0) continue;
+            const mappedActivities = (row.activity ?? [])
+              .map((activity) => ({ activity, mapped: mapMailchimpActivity(activity) }))
+              .filter((item): item is MailchimpActivityWithMapping => Boolean(item.mapped));
 
-        const listId = row.list_id ?? newsletter.audience_id ?? null;
-        let contactId: string | null = null;
+            stats.activities_scanned += mappedActivities.length;
+            if (mappedActivities.length === 0) return null;
+
+            return {
+              email,
+              emailId: row.email_id?.trim() || null,
+              listId: row.list_id ?? newsletter.audience_id ?? null,
+              mappedActivities,
+            };
+          })
+          .filter((row): row is PreparedMailchimpActivityRow => Boolean(row));
+
+        let contactIdsByEmail: Map<string, string>;
         try {
-          contactId = await resolveContactId(supabase, listId, email);
+          contactIdsByEmail = await resolveMailchimpContactBatch(supabase, preparedRows);
         } catch (error) {
           stats.errors.push({
             campaign_id: newsletter.mailchimp_campaign_id,
-            email,
-            message: error instanceof Error ? error.message : 'Failed to resolve contact',
+            message: error instanceof Error ? error.message : 'Failed to batch resolve contacts',
           });
+          processedEmails += rawRows.length;
+          offset += rawRows.length;
+          if (rawRows.length < count) break;
           continue;
         }
 
-        if (!contactId) {
-          stats.contacts_missing += 1;
-          continue;
-        }
+        for (const row of preparedRows) {
+          const contactId = contactIdsByEmail.get(row.email) ?? null;
+          const recipientKey = `${row.listId ?? ''}:${row.email}`;
 
-        stats.contacts_matched += 1;
-        const stateKey = `${campaignId}:${contactId}`;
-        let scoringState = stateCache.get(stateKey);
-        if (!scoringState) {
-          scoringState = await loadScoringState(supabase, campaignId, contactId);
-          stateCache.set(stateKey, scoringState);
-        }
+          if (!contactId) {
+            if (!missingRecipients.has(recipientKey)) {
+              missingRecipients.add(recipientKey);
+              stats.contacts_missing += 1;
+            }
+            continue;
+          }
 
-        for (const { activity, mapped, index } of mappedActivities) {
-          const score = scoreMailchimpActivity(mapped, scoringState);
-          const externalId = buildMailchimpEngagementExternalId({
-            campaignId: newsletter.mailchimp_campaign_id,
-            email,
-            action: mapped.action,
-            timestamp: mapped.timestamp,
-            url: mapped.url,
-            index,
-          });
+          if (!matchedRecipients.has(recipientKey)) {
+            matchedRecipients.add(recipientKey);
+            stats.contacts_matched += 1;
+          }
 
-          try {
-            const status = await insertCampaignEvent(supabase, {
-              campaignId,
-              contactId,
-              email,
-              mapped,
-              score,
-              externalId,
-              newsletter,
-              listId,
-              rawActivity: activity,
-              dryRun: Boolean(options.dryRun),
+          const stateKey = `${bridge.scoringKey}:${contactId}`;
+          let scoringState = stateCache.get(stateKey);
+          if (!scoringState) {
+            scoringState = bridge.campaignId
+              ? await loadScoringState(supabase, bridge.campaignId, contactId)
+              : createEmptyMailchimpScoringState();
+            stateCache.set(stateKey, scoringState);
+          }
+
+          for (const { activity, mapped } of row.mappedActivities) {
+            const score = scoreMailchimpActivity(mapped, scoringState);
+            const externalId = await buildMailchimpEngagementExternalId({
+              campaignId: newsletter.mailchimp_campaign_id,
+              email: row.email,
+              emailId: row.emailId,
+              action: mapped.action,
+              timestamp: mapped.timestamp,
+              url: mapped.url,
+              activity,
             });
 
-            if (status === 'skipped_existing') {
-              stats.events_skipped_existing += 1;
-              continue;
-            }
-
-            stats.events_inserted += 1;
-            applyMailchimpScoreToState(mapped, score.score, scoringState);
-
-            if (!options.dryRun) {
-              await updateCampaignSummary(supabase, {
-                campaignId,
+            try {
+              const status = await insertCampaignEvent(supabase, {
+                campaignId: bridge.campaignId ?? '00000000-0000-0000-0000-000000000000',
                 contactId,
-                email,
-                eventType: mapped.eventType,
-                scoreDelta: score.score,
-                eventTimestamp: mapped.timestamp,
-                isUniqueClickScore: mapped.eventType === 'clicked' && score.score > 0,
+                email: row.email,
+                mapped,
+                score,
+                externalId,
+                newsletter,
+                listId: row.listId,
+                rawActivity: activity,
+                dryRun: Boolean(options.dryRun),
               });
-              stats.summaries_updated += 1;
+
+              if (status === 'skipped_existing') {
+                stats.events_skipped_existing += 1;
+                continue;
+              }
+
+              stats.events_inserted += 1;
+              applyMailchimpScoreToState(mapped, score.score, scoringState);
+
+              if (!options.dryRun && bridge.campaignId) {
+                await updateCampaignSummary(supabase, {
+                  campaignId: bridge.campaignId,
+                  contactId,
+                  email: row.email,
+                  eventType: mapped.eventType,
+                  scoreDelta: score.score,
+                  eventTimestamp: mapped.timestamp,
+                  isUniqueClickScore: mapped.eventType === 'clicked' && score.score > 0,
+                });
+                stats.summaries_updated += 1;
+              }
+            } catch (error) {
+              stats.errors.push({
+                campaign_id: newsletter.mailchimp_campaign_id,
+                email: row.email,
+                message: error instanceof Error ? error.message : 'Failed to process activity',
+              });
             }
-          } catch (error) {
-            stats.errors.push({
-              campaign_id: newsletter.mailchimp_campaign_id,
-              email,
-              message: error instanceof Error ? error.message : 'Failed to process activity',
-            });
           }
         }
+
+        processedEmails += rawRows.length;
+        offset += rawRows.length;
+        if (rawRows.length < count) break;
       }
     } catch (error) {
       stats.errors.push({
