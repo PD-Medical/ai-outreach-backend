@@ -45,6 +45,7 @@ interface ExclusionConfig {
   excludeActiveCampaigns: boolean;
   excludeContactedDays: number | null;
   excludeCampaignIds: string[];
+  includeInternalContacts?: boolean;
 }
 
 interface ClarificationResponse {
@@ -80,6 +81,7 @@ interface PreviewContact {
   lead_classification: string | null;
   engagement_level: string | null;
   lead_score: number | null;
+  is_internal?: boolean | null;
 }
 
 interface PreviewResponse {
@@ -291,6 +293,7 @@ serve(async (req) => {
         lead_classification: row.lead_classification,
         engagement_level: row.engagement_level,
         lead_score: row.lead_score,
+        is_internal: row.is_internal ?? false,
       })),
       generatedSql: sql,
       // Include clarification metadata even when proceeding
@@ -342,7 +345,8 @@ function buildSqlFromFilters(filters: FilterConfig, exclusions: ExclusionConfig)
       c.lead_classification,
       c.engagement_level,
       c.lead_score,
-      o.name AS organization_name
+      o.name AS organization_name,
+      COALESCE(o.is_host, false) AS is_internal
   `;
 
   const fromClause = `
@@ -363,6 +367,9 @@ function buildSqlFromFilters(filters: FilterConfig, exclusions: ExclusionConfig)
   }
   if (exclusions.excludeBounced) {
     conditions.push("c.status != 'bounced'");
+  }
+  if (!exclusions.includeInternalContacts) {
+    conditions.push("COALESCE(o.is_host, false) = false");
   }
 
   // Contact filters
@@ -515,6 +522,9 @@ function buildExclusionContext(exclusions: ExclusionConfig): string {
   if (exclusions.excludeContactedDays) {
     rules.push(`Exclude contacts who received an outgoing email in the last ${exclusions.excludeContactedDays} days`);
   }
+  if (!exclusions.includeInternalContacts) {
+    rules.push("Exclude host-organization/internal contacts");
+  }
 
   return rules.length > 0
     ? `Additional requirements: ${rules.join('. ')}.`
@@ -542,6 +552,15 @@ function applyExclusionsToSql(sql: string, exclusions: ExclusionConfig): string 
   }
   if (exclusions.excludeBounced && !sqlLower.includes("bounced")) {
     additionalConditions.push("c.status != 'bounced'");
+  }
+  if (!exclusions.includeInternalContacts) {
+    additionalConditions.push(`
+      NOT EXISTS (
+        SELECT 1 FROM organizations host_o
+        WHERE host_o.id = c.organization_id
+          AND host_o.is_host = true
+      )
+    `.trim());
   }
 
   // Check for missing campaign enrollment exclusions

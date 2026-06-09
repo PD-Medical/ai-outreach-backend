@@ -240,6 +240,7 @@ export async function insertEmail(
       attachments: email.attachments,
       sent_at: email.sent_at,
       received_at: email.received_at,
+      is_internal: email.is_internal ?? false,
       needs_parsing: needsParsing,
       created_at: new Date().toISOString()
     })

@@ -8,6 +8,7 @@
 import { ImapMessage, ParsedEmail, EmailAttachment, EmailParseError } from './types.ts';
 import { parseImapHeaders, parseImapFlags, extractPlainText } from './imap-client.ts';
 import { parseEmailList } from './thread-builder.ts';
+import { classifyIsInternal, isHostDomain } from './host-org.ts';
 
 /**
  * Determine email direction based on folder and from_email
@@ -34,20 +35,24 @@ export function getEmailDirection(
 
 /**
  * CC Deduplication Logic
- * 
+ *
  * Import rules:
  * 1. Direction = outgoing (from this mailbox) - ALWAYS IMPORT
  * 2. Direction = incoming AND mailboxEmail in to_emails - IMPORT
  * 3. Direction = incoming AND mailboxEmail in cc_emails:
- *    - If To: contains ANY @pdmedical.com.au address - SKIP (avoid duplicates)
+ *    - If To: contains ANY host-org address - SKIP (avoid duplicates)
  *    - If To: contains ONLY external addresses - IMPORT (external communication)
- * 
- * This prevents duplicate imports when multiple PD Medical mailboxes are involved,
- * while ensuring external communications are captured even when CC'd
+ *
+ * Host-org membership is sourced from the registry (`organizations.is_host`)
+ * loaded once per sync via `loadHostDomains(supabase)`. Pass the resulting
+ * Set<string> here as `hostDomains`.
+ *
+ * @param hostDomains - lowercased host-org domains, loaded once via loadHostDomains()
  */
 export function shouldImportEmail(
   email: Pick<ParsedEmail, 'direction' | 'to_emails' | 'cc_emails'>,
-  mailboxEmail: string
+  mailboxEmail: string,
+  hostDomains: Set<string>
 ): boolean {
   // Always import outgoing emails (sent by this mailbox)
   if (email.direction === 'outgoing') {
@@ -63,15 +68,13 @@ export function shouldImportEmail(
     return true;
   }
 
-  // If mailbox is only in CC, check if To: contains any @pdmedical.com.au addresses
+  // If mailbox is only in CC, check if To: contains any host-org addresses
   if (isInCc) {
-    const hasPdMedicalInTo = email.to_emails.some(to => 
-      to.toLowerCase().endsWith('@pdmedical.com.au')
-    );
-    
-    // Only import if To: doesn't contain any @pdmedical.com.au addresses
+    const hasHostInTo = email.to_emails.some(to => isHostDomain(to, hostDomains));
+
+    // Only import if To: doesn't contain any host-org addresses
     // (i.e., this is external communication where we're CC'd)
-    return !hasPdMedicalInTo;
+    return !hasHostInTo;
   }
 
   // Mailbox not in To or CC, don't import
@@ -79,12 +82,16 @@ export function shouldImportEmail(
 }
 
 /**
- * Parse IMAP message into structured email data
+ * Parse IMAP message into structured email data.
+ *
+ * @param hostDomains - lowercased host-org domains, loaded once via loadHostDomains().
+ *                      Used to compute the email's `is_internal` classification.
  */
 export function parseImapMessage(
   imapMessage: ImapMessage,
   mailboxEmail: string,
-  folder: string
+  folder: string,
+  hostDomains: Set<string>
 ): ParsedEmail {
   try {
     const headers = parseImapHeaders(imapMessage.headers);
@@ -180,7 +187,14 @@ export function parseImapMessage(
       headers: headers as Record<string, string | string[]>,
       attachments: [], // Would extract from MIME parts
       sent_at: receivedAt,
-      received_at: receivedAt
+      received_at: receivedAt,
+      is_internal: classifyIsInternal(
+        fromParsed.email,
+        toEmails,
+        ccEmails,
+        [],
+        hostDomains,
+      ),
     };
 
     return parsed;
@@ -400,19 +414,22 @@ export function validateEmailData(email: ParsedEmail): { valid: boolean; errors:
 }
 
 /**
- * Batch parse multiple IMAP messages
+ * Batch parse multiple IMAP messages.
+ *
+ * @param hostDomains - lowercased host-org domains, loaded once via loadHostDomains().
  */
 export function parseImapMessages(
   imapMessages: ImapMessage[],
   mailboxEmail: string,
-  folder: string
+  folder: string,
+  hostDomains: Set<string>
 ): ParsedEmail[] {
   const results: ParsedEmail[] = [];
 
   for (const imapMessage of imapMessages) {
     try {
-      const parsed = parseImapMessage(imapMessage, mailboxEmail, folder);
-      
+      const parsed = parseImapMessage(imapMessage, mailboxEmail, folder, hostDomains);
+
       // Validate
       const validation = validateEmailData(parsed);
       if (validation.valid) {

@@ -201,6 +201,7 @@ export interface ParsedEmail {
   attachments: EmailAttachment[];
   sent_at?: string;
   received_at: string;
+  is_internal?: boolean;
 }
 
 export interface ImapMessage {
