@@ -138,6 +138,18 @@ BEGIN
 END;
 $$;
 
+REVOKE ALL ON FUNCTION public.record_mailchimp_campaign_event(
+  uuid,
+  uuid,
+  text,
+  public.event_type,
+  timestamptz,
+  integer,
+  text,
+  jsonb,
+  boolean
+) FROM PUBLIC, anon, authenticated;
+
 GRANT EXECUTE ON FUNCTION public.record_mailchimp_campaign_event(
   uuid,
   uuid,
@@ -148,4 +160,4 @@ GRANT EXECUTE ON FUNCTION public.record_mailchimp_campaign_event(
   text,
   jsonb,
   boolean
-) TO authenticated, service_role;
+) TO service_role;
