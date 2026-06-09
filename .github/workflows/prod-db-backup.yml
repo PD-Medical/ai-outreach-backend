@@ -1,0 +1,392 @@
+name: Production Database Backup
+
+on:
+  schedule:
+    # GitHub cron runs in UTC. These two windows cover 2 AM Melbourne during
+    # standard time and daylight saving; the job gates on local time below.
+    - cron: "0 15,16 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-db-backup
+  cancel-in-progress: false
+
+env:
+  BACKUP_BUCKET: db-backups
+  BACKUP_PREFIX: prod
+  BACKUP_RETAIN_COUNT: "14"
+  BACKUP_MAX_BYTES: "100000000"
+  BACKUP_WARN_BYTES: "85000000"
+  MELBOURNE_TZ: Australia/Melbourne
+  SUPABASE_POOLER_HOST: aws-1-ap-southeast-2.pooler.supabase.com
+
+jobs:
+  backup:
+    name: pg_dump production database
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Gate scheduled run to 2 AM Melbourne
+        id: schedule_gate
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "reason=manual run" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          local_hour="$(TZ="$MELBOURNE_TZ" date +%H)"
+          local_time="$(TZ="$MELBOURNE_TZ" date +%Y-%m-%dT%H:%M:%S%z)"
+
+          if [[ "$local_hour" == "02" ]]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "reason=scheduled 2 AM Melbourne run at $local_time" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "reason=skipped scheduled run at $local_time" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install PostgreSQL 17 client
+        if: steps.schedule_gate.outputs.should_run == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+          . /etc/os-release
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-17
+
+          /usr/lib/postgresql/17/bin/pg_dump --version
+          /usr/lib/postgresql/17/bin/pg_restore --version
+
+      - name: Create pg_dump archive
+        id: dump
+        if: steps.schedule_gate.outputs.should_run == 'true'
+        shell: bash
+        env:
+          PROD_DB_URL: ${{ secrets.PROD_DB_URL }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+          SUPABASE_PROJECT_ID: ${{ vars.SUPABASE_PROJECT_ID }}
+        run: |
+          set -euo pipefail
+
+          libpq_quote() {
+            local value="$1"
+            value="${value//\\/\\\\}"
+            value="${value//\'/\\\'}"
+            printf "'%s'" "$value"
+          }
+
+          if [[ -n "${PROD_DB_URL:-}" ]]; then
+            database_url="$PROD_DB_URL"
+            connection_source="PROD_DB_URL"
+          elif [[ -n "${SUPABASE_PROJECT_ID:-}" && -n "${SUPABASE_DB_PASSWORD:-}" ]]; then
+            database_url="host=$(libpq_quote "$SUPABASE_POOLER_HOST") port=5432 dbname=postgres user=$(libpq_quote "postgres.${SUPABASE_PROJECT_ID}") password=$(libpq_quote "$SUPABASE_DB_PASSWORD") sslmode=require"
+            connection_source="SUPABASE_PROJECT_ID + SUPABASE_DB_PASSWORD"
+          else
+            echo "Missing PROD_DB_URL, or SUPABASE_PROJECT_ID plus SUPABASE_DB_PASSWORD." >&2
+            exit 1
+          fi
+
+          mkdir -p backup
+
+          utc_stamp="$(date -u +%Y%m%d_%H%M%S)"
+          local_date="$(TZ="$MELBOURNE_TZ" date +%Y/%m/%d)"
+          local_stamp="$(TZ="$MELBOURNE_TZ" date +%Y%m%d_%H%M%S)"
+          object_base="${BACKUP_PREFIX}/${local_date}/prod_${local_stamp}_melbourne"
+          dump_path="backup/prod_${local_stamp}_melbourne.dump"
+          metadata_path="backup/prod_${local_stamp}_melbourne.json"
+
+          dump_started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          /usr/lib/postgresql/17/bin/pg_dump "$database_url" \
+            --format=custom \
+            --compress=9 \
+            --no-owner \
+            --no-privileges \
+            --schema=public \
+            --file="$dump_path"
+          dump_completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          /usr/lib/postgresql/17/bin/pg_restore -l "$dump_path" > /dev/null
+
+          bytes="$(wc -c < "$dump_path" | tr -d ' ')"
+          sha256="$(sha256sum "$dump_path" | awk '{print $1}')"
+          pg_dump_version="$(/usr/lib/postgresql/17/bin/pg_dump --version)"
+
+          if (( bytes > BACKUP_MAX_BYTES )); then
+            {
+              echo "### Production DB Backup Failed"
+              echo ""
+              echo "Dump size ${bytes} bytes exceeds configured limit ${BACKUP_MAX_BYTES} bytes."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          if (( bytes > BACKUP_WARN_BYTES )); then
+            echo "::warning::Dump size ${bytes} bytes is above warning threshold ${BACKUP_WARN_BYTES} bytes."
+          fi
+
+          export META_PROJECT_REF="${SUPABASE_PROJECT_ID:-}"
+          export META_DUMP_OBJECT_PATH="${object_base}.dump"
+          export META_METADATA_OBJECT_PATH="${object_base}.json"
+          export META_LOCAL_DATE="$local_date"
+          export META_LOCAL_TIMESTAMP="$local_stamp"
+          export META_UTC_TIMESTAMP="$utc_stamp"
+          export META_DUMP_STARTED_AT="$dump_started_at"
+          export META_DUMP_COMPLETED_AT="$dump_completed_at"
+          export META_PG_DUMP_VERSION="$pg_dump_version"
+          export META_CONNECTION_SOURCE="$connection_source"
+          export META_BYTES="$bytes"
+          export META_SHA256="$sha256"
+          export META_METADATA_PATH="$metadata_path"
+
+          node <<'NODE'
+          const fs = require("fs");
+          const metadata = {
+            project_ref: process.env.META_PROJECT_REF || null,
+            bucket: process.env.BACKUP_BUCKET,
+            dump_object_path: process.env.META_DUMP_OBJECT_PATH,
+            metadata_object_path: process.env.META_METADATA_OBJECT_PATH,
+            local_timezone: process.env.MELBOURNE_TZ,
+            local_date: process.env.META_LOCAL_DATE,
+            local_timestamp: process.env.META_LOCAL_TIMESTAMP,
+            utc_timestamp: process.env.META_UTC_TIMESTAMP,
+            dump_started_at_utc: process.env.META_DUMP_STARTED_AT,
+            dump_completed_at_utc: process.env.META_DUMP_COMPLETED_AT,
+            format: "pg_dump custom archive",
+            compression: "gzip level 9",
+            scope: "public schema only",
+            pg_dump_version: process.env.META_PG_DUMP_VERSION,
+            connection_source: process.env.META_CONNECTION_SOURCE,
+            bytes: Number(process.env.META_BYTES),
+            sha256: process.env.META_SHA256
+          };
+          fs.writeFileSync(process.env.META_METADATA_PATH, `${JSON.stringify(metadata, null, 2)}\n`);
+          NODE
+
+          {
+            echo "dump_path=$dump_path"
+            echo "metadata_path=$metadata_path"
+            echo "dump_object_path=${object_base}.dump"
+            echo "metadata_object_path=${object_base}.json"
+            echo "bytes=$bytes"
+            echo "sha256=$sha256"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload backup to Supabase Storage
+        id: upload
+        if: steps.schedule_gate.outputs.should_run == 'true'
+        shell: bash
+        env:
+          SUPABASE_PROJECT_ID: ${{ vars.SUPABASE_PROJECT_ID }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          DUMP_PATH: ${{ steps.dump.outputs.dump_path }}
+          METADATA_PATH: ${{ steps.dump.outputs.metadata_path }}
+          DUMP_OBJECT_PATH: ${{ steps.dump.outputs.dump_object_path }}
+          METADATA_OBJECT_PATH: ${{ steps.dump.outputs.metadata_object_path }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${SUPABASE_PROJECT_ID:-}" || -z "${SUPABASE_SERVICE_ROLE_KEY:-}" ]]; then
+            echo "Missing SUPABASE_PROJECT_ID or SUPABASE_SERVICE_ROLE_KEY." >&2
+            exit 1
+          fi
+
+          storage_url="https://${SUPABASE_PROJECT_ID}.supabase.co/storage/v1"
+
+          upload_object() {
+            local source_file="$1"
+            local object_path="$2"
+            local content_type="$3"
+            local response_file
+            response_file="$(mktemp)"
+
+            http_code="$(curl -sS -o "$response_file" -w "%{http_code}" \
+              -X POST "${storage_url}/object/${BACKUP_BUCKET}/${object_path}" \
+              -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" \
+              -H "apikey: ${SUPABASE_SERVICE_ROLE_KEY}" \
+              -H "Content-Type: ${content_type}" \
+              -H "x-upsert: false" \
+              --data-binary "@${source_file}")"
+
+            if [[ "$http_code" != "200" ]]; then
+              echo "Upload failed for ${object_path} with HTTP ${http_code}." >&2
+              cat "$response_file" >&2
+              rm -f "$response_file"
+              exit 1
+            fi
+
+            rm -f "$response_file"
+          }
+
+          upload_object "$DUMP_PATH" "$DUMP_OBJECT_PATH" "application/octet-stream"
+          upload_object "$METADATA_PATH" "$METADATA_OBJECT_PATH" "application/json"
+
+          {
+            echo "dump_url=${storage_url}/object/${BACKUP_BUCKET}/${DUMP_OBJECT_PATH}"
+            echo "metadata_url=${storage_url}/object/${BACKUP_BUCKET}/${METADATA_OBJECT_PATH}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Retain latest 14 backups
+        id: retention
+        if: steps.schedule_gate.outputs.should_run == 'true'
+        shell: bash
+        env:
+          SUPABASE_PROJECT_ID: ${{ vars.SUPABASE_PROJECT_ID }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          set -euo pipefail
+
+          node <<'NODE'
+          const bucket = process.env.BACKUP_BUCKET;
+          const prefix = process.env.BACKUP_PREFIX;
+          const retainCount = Number(process.env.BACKUP_RETAIN_COUNT);
+          const projectRef = process.env.SUPABASE_PROJECT_ID;
+          const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+          if (!bucket || !prefix || !retainCount || !projectRef || !serviceRoleKey) {
+            throw new Error("Missing retention configuration.");
+          }
+
+          const storageUrl = `https://${projectRef}.supabase.co/storage/v1`;
+          const headers = {
+            "Authorization": `Bearer ${serviceRoleKey}`,
+            "apikey": serviceRoleKey,
+            "Content-Type": "application/json"
+          };
+
+          async function listObjects(path) {
+            const response = await fetch(`${storageUrl}/object/list/${bucket}`, {
+              method: "POST",
+              headers,
+              body: JSON.stringify({
+                prefix: path,
+                limit: 1000,
+                offset: 0,
+                sortBy: { column: "name", order: "asc" }
+              })
+            });
+
+            if (!response.ok) {
+              throw new Error(`List failed for ${path}: HTTP ${response.status} ${await response.text()}`);
+            }
+
+            return response.json();
+          }
+
+          async function walk(path) {
+            const entries = await listObjects(path);
+            const files = [];
+
+            for (const entry of entries) {
+              const fullPath = path ? `${path}/${entry.name}` : entry.name;
+              if (entry.id) {
+                files.push({
+                  name: entry.name,
+                  path: fullPath,
+                  updated_at: entry.updated_at,
+                  created_at: entry.created_at
+                });
+              } else {
+                files.push(...await walk(fullPath));
+              }
+            }
+
+            return files;
+          }
+
+          async function removeObjects(paths) {
+            if (paths.length === 0) return;
+
+            const response = await fetch(`${storageUrl}/object/${bucket}`, {
+              method: "DELETE",
+              headers,
+              body: JSON.stringify({ prefixes: paths })
+            });
+
+            if (!response.ok) {
+              throw new Error(`Delete failed: HTTP ${response.status} ${await response.text()}`);
+            }
+          }
+
+          async function main() {
+            const files = await walk(prefix);
+            const dumps = files
+              .filter((file) => file.path.startsWith(`${prefix}/`) && file.path.endsWith(".dump"))
+              .sort((a, b) => b.path.localeCompare(a.path));
+
+            const keptDumps = dumps.slice(0, retainCount);
+            const oldDumps = dumps.slice(retainCount);
+            const deletePaths = new Set();
+            const filePathSet = new Set(files.map((file) => file.path));
+
+            for (const dump of oldDumps) {
+              deletePaths.add(dump.path);
+              const metadataPath = dump.path.replace(/\.dump$/, ".json");
+              if (filePathSet.has(metadataPath)) {
+                deletePaths.add(metadataPath);
+              }
+            }
+
+            await removeObjects([...deletePaths]);
+
+            const summary = {
+              total_dumps_before_retention: dumps.length,
+              kept_dumps: keptDumps.length,
+              deleted_objects: deletePaths.size
+            };
+
+            const fs = require("fs");
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `total_dumps=${dumps.length}\n`);
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `kept_dumps=${keptDumps.length}\n`);
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `deleted_objects=${deletePaths.size}\n`);
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `\n### Retention\n\n`);
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `- Total dumps before retention: ${summary.total_dumps_before_retention}\n`);
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `- Kept dumps: ${summary.kept_dumps}\n`);
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `- Deleted objects: ${summary.deleted_objects}\n`);
+          }
+
+          main().catch((error) => {
+            console.error(error);
+            process.exit(1);
+          });
+          NODE
+
+      - name: Backup summary
+        if: steps.schedule_gate.outputs.should_run == 'true'
+        shell: bash
+        run: |
+          {
+            echo "### Production DB Backup"
+            echo ""
+            echo "- Status: uploaded"
+            echo "- Bucket: \`${BACKUP_BUCKET}\`"
+            echo "- Dump object: \`${{ steps.dump.outputs.dump_object_path }}\`"
+            echo "- Metadata object: \`${{ steps.dump.outputs.metadata_object_path }}\`"
+            echo "- Bytes: \`${{ steps.dump.outputs.bytes }}\`"
+            echo "- SHA256: \`${{ steps.dump.outputs.sha256 }}\`"
+            echo "- Retention: latest \`${BACKUP_RETAIN_COUNT}\` dumps"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Skipped summary
+        if: steps.schedule_gate.outputs.should_run != 'true'
+        shell: bash
+        run: |
+          {
+            echo "### Production DB Backup"
+            echo ""
+            echo "- Status: skipped"
+            echo "- Reason: ${{ steps.schedule_gate.outputs.reason }}"
+          } >> "$GITHUB_STEP_SUMMARY"
