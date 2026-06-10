@@ -46,7 +46,8 @@ FROM (
   SELECT w_inner.id,
          jsonb_agg(
            CASE
-             WHEN action.value ->> 'tool' IN ('create_contact', 'contact:create') THEN
+             WHEN action.value ->> 'tool' IN ('create_contact', 'contact:create')
+               AND action.value -> 'params' ->> 'email' IN ('{alternate_contact}', '{alternate_contact.email}') THEN
                jsonb_set(
                  jsonb_set(
                    action.value,
@@ -58,7 +59,8 @@ FROM (
                  '"{alternate_contact.email} != null"'::jsonb,
                  true
                )
-             WHEN action.value ->> 'tool' IN ('send_email', 'draft_email', 'reply_email', 'forward_email') THEN
+             WHEN action.value ->> 'tool' IN ('send_email', 'draft_email', 'reply_email', 'forward_email')
+               AND action.value -> 'params' ->> 'to' IN ('{alternate_contact}', '{alternate_contact.email}') THEN
                jsonb_set(
                  jsonb_set(
                    action.value,
@@ -195,14 +197,6 @@ VALUES (
 - If the recipient cannot be identified safely, return info_insufficient with the missing detail.$PROMPT$,
   '[]'::jsonb
 )
-ON CONFLICT (key) DO UPDATE SET
-  name = EXCLUDED.name,
-  description = EXCLUDED.description,
-  category = EXCLUDED.category,
-  used_in = EXCLUDED.used_in,
-  content = EXCLUDED.content,
-  variables = EXCLUDED.variables,
-  is_active = true,
-  updated_at = now();
+ON CONFLICT (key) DO NOTHING;
 
 COMMIT;
