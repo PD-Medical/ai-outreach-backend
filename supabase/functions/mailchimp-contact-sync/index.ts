@@ -14,20 +14,10 @@ import {
 type Action = 'import' | 'export' | 'sync';
 
 const SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
-const FUNCTION_AUTH_TOKEN = Deno.env.get('MAILCHIMP_CONTACT_SYNC_RUN_TOKEN') ?? '';
 
 function isServiceRoleRequest(req: Request): boolean {
   const authHeader = req.headers.get('authorization') ?? '';
   return authHeader.startsWith('Bearer ') && authHeader.replace('Bearer ', '') === SERVICE_ROLE_KEY;
-}
-
-function isFunctionRunnerRequest(req: Request): boolean {
-  const authHeader = req.headers.get('authorization') ?? '';
-  return Boolean(
-    FUNCTION_AUTH_TOKEN &&
-      authHeader.startsWith('Bearer ') &&
-      authHeader.replace('Bearer ', '') === FUNCTION_AUTH_TOKEN,
-  );
 }
 
 function isAction(value: unknown): value is Action {
@@ -39,9 +29,7 @@ serve(async (req) => {
     return new Response(null, { headers: corsHeaders });
   }
 
-  const auth = isServiceRoleRequest(req) || isFunctionRunnerRequest(req)
-    ? { user: { id: 'service-role' } }
-    : await requireAdmin(req);
+  const auth = isServiceRoleRequest(req) ? { user: { id: 'service-role' } } : await requireAdmin(req);
   if (auth instanceof Response) return auth;
 
   const supabase = createClient(
