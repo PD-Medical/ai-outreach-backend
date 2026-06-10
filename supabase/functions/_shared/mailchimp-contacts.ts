@@ -50,6 +50,7 @@ export interface ExportCandidate {
 
 export interface SyncStats {
   scanned: number;
+  offset: number;
   created: number;
   updated: number;
   linked: number;
@@ -158,10 +159,11 @@ export async function storeMailchimpAudiences(
 export async function fetchMailchimpMembers(
   listId: string,
   limit = 1000,
+  startOffset = 0,
 ): Promise<MailchimpMember[]> {
   const members: MailchimpMember[] = [];
   const pageSize = 1000;
-  let offset = 0;
+  let offset = Math.max(0, startOffset);
 
   while (members.length < limit) {
     const count = Math.min(pageSize, limit - members.length);
@@ -340,13 +342,15 @@ async function updateLocalComplianceStatus(
 
 export async function importMailchimpContacts(
   supabase: SupabaseClient,
-  options: { listId: string; limit?: number; dryRun?: boolean },
+  options: { listId: string; limit?: number; offset?: number; dryRun?: boolean },
 ): Promise<SyncStats> {
   const limit = Math.max(1, Math.min(options.limit ?? 1000, 10000));
+  const offset = Math.max(0, options.offset ?? 0);
   const tagPrefix = await getTagPrefix(supabase);
-  const members = await fetchMailchimpMembers(options.listId, limit);
+  const members = await fetchMailchimpMembers(options.listId, limit, offset);
   const stats: SyncStats = {
     scanned: members.length,
+    offset,
     created: 0,
     updated: 0,
     linked: 0,
@@ -439,6 +443,7 @@ export async function exportMailchimpContacts(
   const candidates = (data ?? []) as ExportCandidate[];
   const stats: SyncStats = {
     scanned: candidates.length,
+    offset: 0,
     created: 0,
     updated: 0,
     linked: 0,
