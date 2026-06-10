@@ -14,10 +14,20 @@ import {
 type Action = 'import' | 'export' | 'sync';
 
 const SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
+const FUNCTION_AUTH_TOKEN = Deno.env.get('MAILCHIMP_CONTACT_SYNC_RUN_TOKEN') ?? '';
 
 function isServiceRoleRequest(req: Request): boolean {
   const authHeader = req.headers.get('authorization') ?? '';
   return authHeader.startsWith('Bearer ') && authHeader.replace('Bearer ', '') === SERVICE_ROLE_KEY;
+}
+
+function isFunctionRunnerRequest(req: Request): boolean {
+  const authHeader = req.headers.get('authorization') ?? '';
+  return Boolean(
+    FUNCTION_AUTH_TOKEN &&
+      authHeader.startsWith('Bearer ') &&
+      authHeader.replace('Bearer ', '') === FUNCTION_AUTH_TOKEN,
+  );
 }
 
 function isAction(value: unknown): value is Action {
@@ -29,7 +39,9 @@ serve(async (req) => {
     return new Response(null, { headers: corsHeaders });
   }
 
-  const auth = isServiceRoleRequest(req) ? { user: { id: 'service-role' } } : await requireAdmin(req);
+  const auth = isServiceRoleRequest(req) || isFunctionRunnerRequest(req)
+    ? { user: { id: 'service-role' } }
+    : await requireAdmin(req);
   if (auth instanceof Response) return auth;
 
   const supabase = createClient(
@@ -58,6 +70,7 @@ serve(async (req) => {
 
     const dryRun = Boolean(body?.dry_run ?? true);
     const limit = Number.isFinite(Number(body?.limit)) ? Number(body.limit) : undefined;
+    const offset = Number.isFinite(Number(body?.offset)) ? Number(body.offset) : undefined;
 
     const audiences = await fetchMailchimpAudiences();
     await storeMailchimpAudiences(supabase, audiences);
@@ -70,11 +83,11 @@ serve(async (req) => {
     });
 
     const stats = body.action === 'import'
-      ? { import: await importMailchimpContacts(supabase, { listId, limit, dryRun }) }
+      ? { import: await importMailchimpContacts(supabase, { listId, limit, offset, dryRun }) }
       : body.action === 'export'
         ? { export: await exportMailchimpContacts(supabase, { listId, limit, dryRun }) }
         : {
-          import: await importMailchimpContacts(supabase, { listId, limit, dryRun }),
+          import: await importMailchimpContacts(supabase, { listId, limit, offset, dryRun }),
           export: await exportMailchimpContacts(supabase, { listId, limit, dryRun }),
         };
 
@@ -85,6 +98,7 @@ serve(async (req) => {
       action: body.action,
       list_id: listId,
       dry_run: dryRun,
+      offset,
       run_id: runId,
       stats,
       completed_at: new Date().toISOString(),
