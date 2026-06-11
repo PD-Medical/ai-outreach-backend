@@ -234,7 +234,7 @@ AS $$
       COUNT(c.id) FILTER (WHERE c.status = 'active') AS match_active_contact_count
     FROM scoped_orgs o
     LEFT JOIN public.contacts c
-      ON c.organization_id = o.id
+      ON COALESCE(c.organization_id, 'ffffffff-ffff-4fff-8fff-ffffffffffff'::uuid) = o.id
       AND (
         COALESCE(array_length(p_statuses, 1), 0) = 0
         OR c.status = ANY(p_statuses)
@@ -322,7 +322,7 @@ CREATE OR REPLACE FUNCTION public.get_contacts_for_organization(
   p_search text DEFAULT NULL,
   p_statuses text[] DEFAULT NULL,
   p_show_internal boolean DEFAULT FALSE,
-  p_limit integer DEFAULT 200,
+  p_limit integer DEFAULT 500,
   p_offset integer DEFAULT 0
 )
 RETURNS TABLE(contact jsonb)
@@ -363,7 +363,7 @@ AS $$
     ORDER BY ccs.total_score DESC NULLS LAST, ccs.last_event_at DESC NULLS LAST
     LIMIT 1
   ) s ON TRUE
-  WHERE c.organization_id = p_organization_id
+  WHERE COALESCE(c.organization_id, 'ffffffff-ffff-4fff-8fff-ffffffffffff'::uuid) = p_organization_id
     AND (p_show_internal OR COALESCE(o.is_host, FALSE) = FALSE)
     AND (
       COALESCE(array_length(p_statuses, 1), 0) = 0
@@ -393,7 +393,7 @@ AS $$
       )
     )
   ORDER BY c.updated_at DESC NULLS LAST, c.created_at DESC NULLS LAST, c.id
-  LIMIT LEAST(GREATEST(p_limit, 1), 500)
+  LIMIT LEAST(GREATEST(p_limit, 1), 1000)
   OFFSET GREATEST(p_offset, 0);
 $$;
 
@@ -491,7 +491,7 @@ AS $$
       AND c.email_count > 0
       AND (p_mailbox_id IS NULL OR c.mailbox_id = p_mailbox_id)
       AND (p_requires_response IS NULL OR c.requires_response = p_requires_response)
-      AND (p_unread IS NULL OR le.is_seen = NOT p_unread)
+      AND (p_unread IS NULL OR (p_unread = TRUE AND le.is_seen = FALSE))
       AND (p_priority_min IS NULL OR COALESCE(le.priority_score, 0) >= p_priority_min)
       AND (p_show_internal OR COALESCE(le.is_internal, FALSE) = FALSE)
       AND (
