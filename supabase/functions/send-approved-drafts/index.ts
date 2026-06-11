@@ -106,7 +106,7 @@ serve(async (req) => {
     const { data: drafts, error: selectError } = await supabaseAdmin
       .from("email_drafts")
       .select(
-        "id, subject, body_html, body_plain, to_emails, cc_emails, bcc_emails, thread_id, conversation_id, from_mailbox_id, sent_email_id, sent_at, contact_id, workflow_execution_id, campaign_enrollment_id, source_email_id"
+        "id, subject, body_html, body_plain, to_emails, cc_emails, bcc_emails, thread_id, conversation_id, from_mailbox_id, sent_email_id, sent_email_message_id, sent_at, contact_id, workflow_execution_id, campaign_enrollment_id, source_email_id, source_email_message_id"
       )
       .in("approval_status", ["approved", "auto_approved"])
       .is("sent_email_id", null)
@@ -160,7 +160,7 @@ serve(async (req) => {
         if (draft.source_email_id) {
           const { data: sourceEmail, error: sourceError } = await supabaseAdmin
             .from("emails")
-            .select("message_id, email_references, body_html, body_plain, from_email, received_at")
+            .select("id, email_message_id, message_id, email_references, body_html, body_plain, from_email, received_at")
             .eq("id", draft.source_email_id)
             .single();
 
@@ -318,10 +318,8 @@ serve(async (req) => {
 
         const nowIso = new Date().toISOString();
 
-        // 9) Insert record into emails table
-        const { data: emailRow, error: emailError } = await supabaseAdmin
-          .from("emails")
-          .insert({
+        // 9) Insert canonical message + Sent mailbox copy.
+        const sentPayload = {
             message_id: resendMessageId,
             thread_id: draft.thread_id || crypto.randomUUID(),
             conversation_id: draft.conversation_id,
@@ -340,10 +338,15 @@ serve(async (req) => {
             imap_folder: "Sent",
             sent_at: nowIso,
             received_at: nowIso,
-          })
-          .select("id")
-          .single();
+        };
 
+        const { data: emailRows, error: emailError } = await supabaseAdmin
+          .rpc("upsert_email_message_copy", {
+            message_payload: sentPayload,
+            copy_payload: sentPayload,
+          });
+
+        const emailRow = Array.isArray(emailRows) ? emailRows[0] : emailRows;
         if (emailError || !emailRow) {
           console.error("Failed to insert email record", emailError);
           continue;
@@ -353,7 +356,8 @@ serve(async (req) => {
         const { error: updateError } = await supabaseAdmin
           .from("email_drafts")
           .update({
-            sent_email_id: emailRow.id,
+            sent_email_id: emailRow.mailbox_copy_id,
+            sent_email_message_id: emailRow.email_message_id,
             sent_at: nowIso,
             approval_status: "sent",
           })
