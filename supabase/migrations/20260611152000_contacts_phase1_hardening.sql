@@ -36,7 +36,7 @@ LANGUAGE plpgsql
 AS $$
 BEGIN
   IF OLD.id = 'ffffffff-ffff-4fff-8fff-ffffffffffff'::uuid
-     OR COALESCE((OLD.custom_fields->>'is_unknown_sentinel')::boolean, false) = true THEN
+     OR lower(COALESCE(OLD.custom_fields->>'is_unknown_sentinel', 'false')) = 'true' THEN
     RAISE EXCEPTION
       'Cannot delete the Unknown sentinel organisation (%, %). Re-assign contacts to a real organisation instead.',
       OLD.id, OLD.name;
@@ -89,7 +89,7 @@ BEGIN
   WHERE id = 'ffffffff-ffff-4fff-8fff-ffffffffffff'::uuid
     AND name = 'Unknown'
     AND source = 'seeded'
-    AND COALESCE((custom_fields->>'is_unknown_sentinel')::boolean, false) = true;
+    AND lower(COALESCE(custom_fields->>'is_unknown_sentinel', 'false')) = 'true';
 
   IF v_count <> 1 THEN
     RAISE EXCEPTION 'Contacts Phase 1 hardening failed: Unknown sentinel row missing or malformed';
