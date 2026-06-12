@@ -8,7 +8,15 @@
  *   {
  *     format: 'csv',                  // only csv for v1
  *     fields: string[],               // whitelist below; defaults if omitted
- *     contact_ids?: string[],         // optional filter (max 1000); if absent, ALL contacts
+ *     scope?: 'all'|'filtered'|'ids', // filtered uses current Contacts page filters
+ *     filters?: {                     // optional server-side Contacts filters
+ *       search?: string,
+ *       statuses?: string[],
+ *       state?: string,
+ *       category?: string,
+ *       show_internal?: boolean
+ *     },
+ *     contact_ids?: string[],         // optional page/id filter (max 1000)
  *     limit?: number,                 // safety cap (default 2000, max 5000)
  *   }
  *
@@ -52,6 +60,14 @@ import { requireAdmin } from "../_shared/auth.ts";
 interface ExportRequest {
   format?: "csv";
   fields?: string[];
+  scope?: "all" | "filtered" | "ids";
+  filters?: {
+    search?: string | null;
+    statuses?: string[] | null;
+    state?: string | null;
+    category?: string | null;
+    show_internal?: boolean | null;
+  };
   contact_ids?: string[];
   limit?: number;
 }
@@ -135,6 +151,21 @@ function isoStamp(): string {
   return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}-${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}`;
 }
 
+function normalizeFilterText(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed === "all") return null;
+  return trimmed;
+}
+
+function normalizeStatuses(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null;
+  const statuses = value
+    .map((status) => typeof status === "string" ? status.trim() : "")
+    .filter(Boolean);
+  return statuses.length > 0 ? statuses : null;
+}
+
 serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
@@ -203,20 +234,43 @@ serve(async (req) => {
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "",
     );
 
-    // Pull from v_contact_engagement_profile so org joins + per-contact stats
-    // are pre-computed. Select the union of fields-being-exported AND
-    // contact_id (always needed for stable row identity / future merges).
-    const selectCols = ["contact_id", ...fields].join(",");
-    let query = supabase.from("v_contact_engagement_profile").select(selectCols).limit(limit);
+    const scope = body.scope ?? (Array.isArray(body.contact_ids) ? "ids" : body.filters ? "filtered" : "all");
+    let data: Record<string, unknown>[] | null = null;
+    let error: { message?: string } | null = null;
 
-    if (Array.isArray(body.contact_ids) && body.contact_ids.length > 0) {
-      query = query.in("contact_id", body.contact_ids);
+    if (scope === "filtered") {
+      const filters = body.filters ?? {};
+      const result = await supabase.rpc("get_contact_export_rows", {
+        p_search: normalizeFilterText(filters.search),
+        p_statuses: normalizeStatuses(filters.statuses),
+        p_state: normalizeFilterText(filters.state) ?? "all",
+        p_category: normalizeFilterText(filters.category) ?? "all",
+        p_show_internal: filters.show_internal === true,
+        p_limit: limit,
+      });
+      error = result.error;
+      data = ((result.data ?? []) as Array<{ row_data?: Record<string, unknown> }>)
+        .map((row) => row.row_data)
+        .filter((row): row is Record<string, unknown> => Boolean(row));
+    } else {
+      // Pull from v_contact_engagement_profile so org joins + per-contact stats
+      // are pre-computed. Select the union of fields-being-exported AND
+      // contact_id (always needed for stable row identity / future merges).
+      const selectCols = ["contact_id", ...fields].join(",");
+      let query = supabase.from("v_contact_engagement_profile").select(selectCols).limit(limit);
+
+      if (scope === "ids" && Array.isArray(body.contact_ids) && body.contact_ids.length > 0) {
+        query = query.in("contact_id", body.contact_ids);
+      }
+
+      // Stable order so re-exports are diffable.
+      query = query.order("email", { ascending: true });
+
+      const result = await query;
+      data = result.data as Record<string, unknown>[] | null;
+      error = result.error;
     }
 
-    // Stable order so re-exports are diffable.
-    query = query.order("email", { ascending: true });
-
-    const { data, error } = await query;
     if (error) {
       // Defensive: if the view doesn't exist (PR #74 hasn't shipped), surface
       // a helpful 503 rather than a generic 500 so operators understand the

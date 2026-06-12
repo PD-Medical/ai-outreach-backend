@@ -5,17 +5,22 @@
  *   POST { mailbox_id, status, from, to, q, cursor, limit }
  *
  * Returns a paginated activity log:
- *   { rows: [...v_email_activity rows], next_cursor: string|null, total_estimate: number|null }
+ *   {
+ *     rows: [...v_email_activity rows],
+ *     next_cursor: string|null,
+ *     total_estimate: number|null,
+ *     counts: { all, pending, enriched, failed, rate_limited, skipped }|null
+ *   }
  *
  * Cursor format: ISO timestamp of `imported_at` of the last row in the previous page.
  */
-import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.0";
-import { corsHeaders } from "../_shared/cors.ts";
-import { requireAuth } from "../_shared/auth.ts";
+import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.39.0';
+import { corsHeaders } from '../_shared/cors.ts';
+import { requireAuth } from '../_shared/auth.ts';
 
-const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
-const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
+const SUPABASE_URL = Deno.env.get('SUPABASE_URL') ?? '';
+const SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
 
 serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
@@ -30,7 +35,11 @@ serve(async (req) => {
   // deno-lint-ignore no-explicit-any
   let body: any = null;
   if (req.method === 'POST') {
-    try { body = await req.json(); } catch { body = null; }
+    try {
+      body = await req.json();
+    } catch {
+      body = null;
+    }
   }
   const get = (k: string): string | null => {
     const v = body?.[k];
@@ -65,14 +74,19 @@ serve(async (req) => {
   }
   if (from) query = query.gte('imported_at', from);
   if (to) query = query.lte('imported_at', to);
-  if (q) query = query.or(
-    `from_address.ilike.%${q}%,from_name.ilike.%${q}%,subject.ilike.%${q}%,message_id.ilike.%${q}%`
-  );
+  if (q) {
+    query = query.or(
+      `from_address.ilike.%${q}%,from_name.ilike.%${q}%,subject.ilike.%${q}%,message_id.ilike.%${q}%`,
+    );
+  }
   if (cursor) query = query.lt('imported_at', cursor);
 
   const { data, error } = await query;
   if (error) {
-    return new Response(JSON.stringify({ error: error.message }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    return new Response(JSON.stringify({ error: error.message }), {
+      status: 500,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
   }
 
   const rows = data ?? [];
@@ -80,22 +94,47 @@ serve(async (req) => {
   const page = hasMore ? rows.slice(0, limit) : rows;
   const nextCursor = hasMore ? page[page.length - 1].imported_at : null;
 
-  // Approximate total via head count, only on the first page (no cursor) to save cost on subsequent pages.
+  // Exact status counts, only on the first page (no cursor) to save cost on subsequent pages.
   let totalEstimate: number | null = null;
+  let counts: Record<string, number> | null = null;
   if (!cursor) {
-    let countQ = supabase.from('v_email_activity').select('id', { count: 'exact', head: true });
-    if (mailboxId) countQ = countQ.eq('mailbox_id', mailboxId);
-    if (status && status !== 'all') {
-      if (status === 'failed') countQ = countQ.in('enrichment_status', ['failed', 'import_failed']);
-      else countQ = countQ.eq('enrichment_status', status);
-    }
-    if (from) countQ = countQ.gte('imported_at', from);
-    if (to) countQ = countQ.lte('imported_at', to);
-    const { count } = await countQ;
-    totalEstimate = count ?? null;
+    const statusBuckets: Array<{ key: string; statuses: string[] | null }> = [
+      { key: 'all', statuses: null },
+      { key: 'pending', statuses: ['pending'] },
+      { key: 'enriched', statuses: ['enriched'] },
+      { key: 'failed', statuses: ['failed', 'import_failed'] },
+      { key: 'rate_limited', statuses: ['rate_limited'] },
+      { key: 'skipped', statuses: ['skipped'] },
+    ];
+
+    const countResults = await Promise.all(statusBuckets.map(async (bucket) => {
+      let countQ = supabase.from('v_email_activity').select('id', { count: 'exact', head: true });
+      if (mailboxId) countQ = countQ.eq('mailbox_id', mailboxId);
+      if (from) countQ = countQ.gte('imported_at', from);
+      if (to) countQ = countQ.lte('imported_at', to);
+      if (q) {
+        countQ = countQ.or(
+          `from_address.ilike.%${q}%,from_name.ilike.%${q}%,subject.ilike.%${q}%,message_id.ilike.%${q}%`,
+        );
+      }
+      if (bucket.statuses) {
+        if (bucket.statuses.length === 1) {
+          countQ = countQ.eq('enrichment_status', bucket.statuses[0]);
+        } else countQ = countQ.in('enrichment_status', bucket.statuses);
+      }
+      const { count } = await countQ;
+      return [bucket.key, count ?? 0] as const;
+    }));
+
+    counts = { all: 0, pending: 0, enriched: 0, failed: 0, rate_limited: 0, skipped: 0 };
+    for (const [key, count] of countResults) counts[key] = count;
+    totalEstimate = status && status !== 'all' ? counts[status] : counts.all;
   }
 
-  return new Response(JSON.stringify({ rows: page, next_cursor: nextCursor, total_estimate: totalEstimate }), {
-    headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-  });
+  return new Response(
+    JSON.stringify({ rows: page, next_cursor: nextCursor, total_estimate: totalEstimate, counts }),
+    {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    },
+  );
 });

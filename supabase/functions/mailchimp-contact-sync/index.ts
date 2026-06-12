@@ -14,10 +14,51 @@ import {
 type Action = 'import' | 'export' | 'sync';
 
 const SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
+const SUPABASE_URL = Deno.env.get('SUPABASE_URL') ?? '';
 
 function isServiceRoleRequest(req: Request): boolean {
   const authHeader = req.headers.get('authorization') ?? '';
   return authHeader.startsWith('Bearer ') && authHeader.replace('Bearer ', '') === SERVICE_ROLE_KEY;
+}
+
+function decodeJwtPayload(token: string): Record<string, unknown> | null {
+  const [, payload] = token.split('.');
+  if (!payload) return null;
+
+  try {
+    return JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/')));
+  } catch {
+    return null;
+  }
+}
+
+function projectRefFromUrl(url: string): string | null {
+  try {
+    return new URL(url).hostname.split('.')[0] || null;
+  } catch {
+    return null;
+  }
+}
+
+async function isValidServiceRoleJwtRequest(req: Request): Promise<boolean> {
+  const authHeader = req.headers.get('authorization') ?? '';
+  if (!authHeader.startsWith('Bearer ')) return false;
+
+  const token = authHeader.replace('Bearer ', '').trim();
+  const payload = decodeJwtPayload(token);
+  if (payload?.role !== 'service_role') return false;
+
+  const projectRef = projectRefFromUrl(SUPABASE_URL);
+  if (projectRef && payload.ref && payload.ref !== projectRef) return false;
+
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/profiles?select=auth_user_id&limit=1`, {
+    headers: {
+      apikey: token,
+      Authorization: `Bearer ${token}`,
+    },
+  });
+
+  return response.ok;
 }
 
 function isAction(value: unknown): value is Action {
@@ -29,11 +70,13 @@ serve(async (req) => {
     return new Response(null, { headers: corsHeaders });
   }
 
-  const auth = isServiceRoleRequest(req) ? { user: { id: 'service-role' } } : await requireAdmin(req);
+  const auth = isServiceRoleRequest(req) || await isValidServiceRoleJwtRequest(req)
+    ? { user: { id: 'service-role' } }
+    : await requireAdmin(req);
   if (auth instanceof Response) return auth;
 
   const supabase = createClient(
-    Deno.env.get('SUPABASE_URL') ?? '',
+    SUPABASE_URL,
     Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '',
   );
 
@@ -58,6 +101,7 @@ serve(async (req) => {
 
     const dryRun = Boolean(body?.dry_run ?? true);
     const limit = Number.isFinite(Number(body?.limit)) ? Number(body.limit) : undefined;
+    const offset = Number.isFinite(Number(body?.offset)) ? Number(body.offset) : undefined;
 
     const audiences = await fetchMailchimpAudiences();
     await storeMailchimpAudiences(supabase, audiences);
@@ -70,11 +114,11 @@ serve(async (req) => {
     });
 
     const stats = body.action === 'import'
-      ? { import: await importMailchimpContacts(supabase, { listId, limit, dryRun }) }
+      ? { import: await importMailchimpContacts(supabase, { listId, limit, offset, dryRun }) }
       : body.action === 'export'
         ? { export: await exportMailchimpContacts(supabase, { listId, limit, dryRun }) }
         : {
-          import: await importMailchimpContacts(supabase, { listId, limit, dryRun }),
+          import: await importMailchimpContacts(supabase, { listId, limit, offset, dryRun }),
           export: await exportMailchimpContacts(supabase, { listId, limit, dryRun }),
         };
 
@@ -85,6 +129,7 @@ serve(async (req) => {
       action: body.action,
       list_id: listId,
       dry_run: dryRun,
+      offset,
       run_id: runId,
       stats,
       completed_at: new Date().toISOString(),
