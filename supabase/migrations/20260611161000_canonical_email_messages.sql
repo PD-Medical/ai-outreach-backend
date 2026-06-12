@@ -89,12 +89,12 @@ CREATE POLICY email_messages_select_policy
 
 DROP POLICY IF EXISTS email_messages_insert_policy ON public.email_messages;
 CREATE POLICY email_messages_insert_policy
-  ON public.email_messages FOR INSERT
+  ON public.email_messages FOR INSERT TO service_role
   WITH CHECK (true);
 
 DROP POLICY IF EXISTS email_messages_update_policy ON public.email_messages;
 CREATE POLICY email_messages_update_policy
-  ON public.email_messages FOR UPDATE
+  ON public.email_messages FOR UPDATE TO service_role
   USING (true);
 
 DROP POLICY IF EXISTS email_messages_delete_policy ON public.email_messages;
@@ -226,6 +226,17 @@ CREATE TRIGGER set_email_messages_updated_at
   BEFORE UPDATE ON public.email_messages
   FOR EACH ROW EXECUTE FUNCTION public.set_email_messages_updated_at();
 
+CREATE OR REPLACE FUNCTION public.trigger_workflow_matching_for_message(p_email_message_id uuid)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+  RETURN false;
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION public.upsert_email_message_copy(
   message_payload jsonb,
   copy_payload jsonb
@@ -328,8 +339,33 @@ BEGIN
       ELSE LEAST(public.email_messages.received_at, EXCLUDED.received_at)
     END,
     needs_parsing = EXCLUDED.needs_parsing,
+    intent = coalesce(EXCLUDED.intent, public.email_messages.intent),
+    email_category = coalesce(EXCLUDED.email_category, public.email_messages.email_category),
+    sentiment = coalesce(EXCLUDED.sentiment, public.email_messages.sentiment),
+    priority_score = coalesce(EXCLUDED.priority_score, public.email_messages.priority_score),
+    spam_score = coalesce(EXCLUDED.spam_score, public.email_messages.spam_score),
+    ai_processed_at = coalesce(EXCLUDED.ai_processed_at, public.email_messages.ai_processed_at),
+    ai_model_version = coalesce(EXCLUDED.ai_model_version, public.email_messages.ai_model_version),
+    ai_confidence_score = coalesce(EXCLUDED.ai_confidence_score, public.email_messages.ai_confidence_score),
+    enrichment_status = CASE
+      WHEN EXCLUDED.enrichment_status IS NULL OR EXCLUDED.enrichment_status = 'pending'
+        THEN public.email_messages.enrichment_status
+      WHEN public.email_messages.enrichment_status IS NULL OR public.email_messages.enrichment_status = 'pending'
+        THEN EXCLUDED.enrichment_status
+      WHEN EXCLUDED.enriched_at IS NOT NULL
+        AND (public.email_messages.enriched_at IS NULL OR EXCLUDED.enriched_at >= public.email_messages.enriched_at)
+        THEN EXCLUDED.enrichment_status
+      ELSE public.email_messages.enrichment_status
+    END,
+    enriched_at = coalesce(EXCLUDED.enriched_at, public.email_messages.enriched_at),
+    last_enrichment_error = coalesce(EXCLUDED.last_enrichment_error, public.email_messages.last_enrichment_error),
     message_kind = EXCLUDED.message_kind,
     is_internal = EXCLUDED.is_internal,
+    mailchimp_newsletter_id = coalesce(EXCLUDED.mailchimp_newsletter_id, public.email_messages.mailchimp_newsletter_id),
+    mailchimp_match_method = coalesce(EXCLUDED.mailchimp_match_method, public.email_messages.mailchimp_match_method),
+    mailchimp_match_confidence = coalesce(EXCLUDED.mailchimp_match_confidence, public.email_messages.mailchimp_match_confidence),
+    mailchimp_match_reason = coalesce(EXCLUDED.mailchimp_match_reason, public.email_messages.mailchimp_match_reason),
+    workflow_matched_at = coalesce(public.email_messages.workflow_matched_at, EXCLUDED.workflow_matched_at),
     auth_user_id = coalesce(EXCLUDED.auth_user_id, public.email_messages.auth_user_id)
   RETURNING id INTO email_message_id;
 
@@ -435,6 +471,8 @@ BEGIN
     copy_created := true;
   END IF;
 
+  PERFORM public.trigger_workflow_matching_for_message(email_message_id);
+
   RETURN NEXT;
 END;
 $$;
@@ -488,8 +526,8 @@ $$;
 REVOKE EXECUTE ON FUNCTION public.backfill_email_canonical_references() FROM PUBLIC, authenticated, anon;
 GRANT EXECUTE ON FUNCTION public.backfill_email_canonical_references() TO service_role;
 
-CREATE OR REPLACE FUNCTION public.trigger_workflow_matching()
-RETURNS trigger
+CREATE OR REPLACE FUNCTION public.trigger_workflow_matching_for_message(p_email_message_id uuid)
+RETURNS boolean
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = public, pg_temp
@@ -497,26 +535,32 @@ AS $$
 DECLARE
   lambda_url text;
   source_copy_id uuid;
+  v_email_category text;
+  v_workflow_matched_at timestamptz;
+  v_marked boolean := false;
 BEGIN
-  IF TG_OP = 'UPDATE' AND OLD.email_category IS NOT DISTINCT FROM NEW.email_category THEN
-    RETURN NEW;
+  SELECT email_category, workflow_matched_at
+    INTO v_email_category, v_workflow_matched_at
+  FROM public.email_messages
+  WHERE id = p_email_message_id;
+
+  IF NOT FOUND THEN
+    RETURN false;
   END IF;
 
-  IF NEW.workflow_matched_at IS NOT NULL THEN
-    RETURN NEW;
+  IF v_workflow_matched_at IS NOT NULL THEN
+    RETURN false;
   END IF;
 
-  IF NEW.email_category IS NULL OR NOT NEW.email_category LIKE 'business-%' THEN
-    RETURN NEW;
-  END IF;
-
-  IF NEW.email_category = 'business-transactional' THEN
-    RETURN NEW;
+  IF v_email_category IS NULL
+     OR NOT v_email_category LIKE 'business-%'
+     OR v_email_category = 'business-transactional' THEN
+    RETURN false;
   END IF;
 
   SELECT c.id INTO source_copy_id
   FROM public.email_mailbox_copies c
-  WHERE c.email_message_id = NEW.id
+  WHERE c.email_message_id = p_email_message_id
     AND c.direction = 'incoming'
     AND COALESCE(c.skip_workflows, false) = false
     AND COALESCE(c.is_deleted, false) = false
@@ -524,7 +568,7 @@ BEGIN
   LIMIT 1;
 
   IF source_copy_id IS NULL THEN
-    RETURN NEW;
+    RETURN false;
   END IF;
 
   SELECT value #>> '{}' INTO lambda_url
@@ -532,10 +576,18 @@ BEGIN
   WHERE key = 'workflow_matcher_url';
 
   IF lambda_url IS NULL OR lambda_url = '' THEN
-    RETURN NEW;
+    RETURN false;
   END IF;
 
-  NEW.workflow_matched_at := now();
+  UPDATE public.email_messages
+     SET workflow_matched_at = now()
+   WHERE id = p_email_message_id
+     AND workflow_matched_at IS NULL
+   RETURNING true INTO v_marked;
+
+  IF NOT coalesce(v_marked, false) THEN
+    RETURN false;
+  END IF;
 
   BEGIN
     PERFORM net.http_post(
@@ -543,14 +595,33 @@ BEGIN
       headers := '{"Content-Type": "application/json"}'::jsonb,
       body := json_build_object(
         'email_id', source_copy_id,
-        'email_message_id', NEW.id
+        'email_message_id', p_email_message_id
       )::jsonb,
       timeout_milliseconds := 30000
     );
   EXCEPTION WHEN OTHERS THEN
-    RAISE WARNING 'Failed to trigger workflow matcher for canonical email message %: %', NEW.id, SQLERRM;
+    RAISE WARNING 'Failed to trigger workflow matcher for canonical email message %: %', p_email_message_id, SQLERRM;
   END;
 
+  RETURN true;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.trigger_workflow_matching_for_message(uuid) FROM PUBLIC, authenticated, anon;
+GRANT EXECUTE ON FUNCTION public.trigger_workflow_matching_for_message(uuid) TO service_role;
+
+CREATE OR REPLACE FUNCTION public.trigger_workflow_matching()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+  IF TG_OP = 'UPDATE' AND OLD.email_category IS NOT DISTINCT FROM NEW.email_category THEN
+    RETURN NEW;
+  END IF;
+
+  PERFORM public.trigger_workflow_matching_for_message(NEW.id);
   RETURN NEW;
 END;
 $$;
@@ -558,7 +629,7 @@ $$;
 DROP TRIGGER IF EXISTS trigger_match_workflows ON public.email_mailbox_copies;
 DROP TRIGGER IF EXISTS trigger_match_workflows ON public.email_messages;
 CREATE TRIGGER trigger_match_workflows
-  BEFORE INSERT OR UPDATE OF email_category ON public.email_messages
+  AFTER INSERT OR UPDATE OF email_category ON public.email_messages
   FOR EACH ROW
   WHEN (NEW.email_category IS NOT NULL AND NEW.email_category LIKE 'business-%')
   EXECUTE FUNCTION public.trigger_workflow_matching();
