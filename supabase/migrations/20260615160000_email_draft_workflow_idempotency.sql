@@ -12,6 +12,36 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_email_drafts_active_idempotency_key
 COMMENT ON COLUMN public.email_drafts.idempotency_key IS
   'Stable key for duplicate prevention. Workflow drafts use workflow:{workflow_execution_id}:action:{action_index}.';
 
+CREATE OR REPLACE FUNCTION public.protect_email_draft_idempotency_key()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  IF auth.role() = 'service_role' THEN
+    RETURN NEW;
+  END IF;
+
+  IF TG_OP = 'INSERT' AND NEW.idempotency_key IS NOT NULL THEN
+    RAISE EXCEPTION 'email_drafts.idempotency_key is server-managed';
+  END IF;
+
+  IF TG_OP = 'UPDATE' AND NEW.idempotency_key IS DISTINCT FROM OLD.idempotency_key THEN
+    RAISE EXCEPTION 'email_drafts.idempotency_key is server-managed';
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS protect_email_draft_idempotency_key ON public.email_drafts;
+
+CREATE TRIGGER protect_email_draft_idempotency_key
+  BEFORE INSERT OR UPDATE ON public.email_drafts
+  FOR EACH ROW
+  EXECUTE FUNCTION public.protect_email_draft_idempotency_key();
+
 CREATE OR REPLACE FUNCTION public.get_pending_approvals_page(
   p_statuses text[] DEFAULT ARRAY['pending']::text[],
   p_history_filter text DEFAULT NULL,
