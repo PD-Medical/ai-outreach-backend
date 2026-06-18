@@ -96,7 +96,7 @@ async function buildItems(supabase: any): Promise<HealthItem[]> {
   // 4. Pending-enrichment backlog older than 24h -> yellow
   const oneDayAgoIso = new Date(Date.now() - 86400_000).toISOString();
   const { count: pendingCount } = await supabase
-    .from("emails")
+    .from("email_messages")
     .select("id", { count: "exact", head: true })
     .eq("enrichment_status", "pending")
     .lt("created_at", oneDayAgoIso);

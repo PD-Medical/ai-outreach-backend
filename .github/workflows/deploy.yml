@@ -115,8 +115,10 @@ jobs:
         if: ${{ github.event_name == 'pull_request' }}
         run: |
           echo "Validating Supabase configuration..."
-          # Validate that migrations can be parsed (dry-run)
-          supabase db push --dry-run
+          # Validate the same migration mode used by deployments.
+          # --include-all is required when a PR adds migrations that are earlier
+          # than migrations already applied on the target project.
+          supabase db push --dry-run --include-all
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}

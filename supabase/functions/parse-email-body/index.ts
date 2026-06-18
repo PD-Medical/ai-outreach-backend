@@ -45,7 +45,7 @@ serve(async (req) => {
     // Fetch email from database
     const { data: email, error: fetchError } = await supabase
       .from('emails')
-      .select('id, body_plain, needs_parsing')
+      .select('id, email_message_id, body_plain, needs_parsing')
       .eq('id', email_id)
       .single();
 
@@ -78,9 +78,22 @@ serve(async (req) => {
     const parsedBody = extractPlainText(email.body_plain || '');
     console.log(`[ParseBody] Parsed body length: ${parsedBody.length} bytes`);
 
-    // Update database with parsed body
-    const { error: updateError } = await supabase
-      .from('emails')
+    // Update canonical message content and mirror the copy for rollback/compat.
+    const { error: updateMessageError } = await supabase
+      .from('email_messages')
+      .update({
+        body_plain: parsedBody,
+        needs_parsing: false,
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', email.email_message_id || email_id);
+
+    if (updateMessageError) {
+      throw new Error(`Failed to update email message: ${updateMessageError.message}`);
+    }
+
+    const { error: updateCopyError } = await supabase
+      .from('email_mailbox_copies')
       .update({
         body_plain: parsedBody,
         needs_parsing: false,
@@ -88,8 +101,8 @@ serve(async (req) => {
       })
       .eq('id', email_id);
 
-    if (updateError) {
-      throw new Error(`Failed to update email: ${updateError.message}`);
+    if (updateCopyError) {
+      throw new Error(`Failed to update email copy: ${updateCopyError.message}`);
     }
 
     console.log('[ParseBody] Successfully parsed and updated email');
@@ -112,5 +125,4 @@ serve(async (req) => {
     );
   }
 });
-
 

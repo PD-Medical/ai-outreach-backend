@@ -47,7 +47,7 @@ serve(async (req: Request) => {
     }
 
     const { count: internalNow } = await supabase
-      .from("emails")
+      .from("email_messages")
       .select("id", { count: "exact", head: true })
       .eq("is_internal", true);
 
